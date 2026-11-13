@@ -8,6 +8,7 @@
 #include "src/inc/MarlinConfig.h"
 
 #include "audio.h"
+#include "host_viewer.h"
 
 RawSocketSerial net_serial{};
 
@@ -73,13 +74,16 @@ int main(int argc, char** argv) {
   double quit_after = 0;
   std::string snapshot;
   bool reset = false;
+  uintptr_t viewer_parent = 0;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
     if (arg == "--port" && i + 1 < argc) { const int value = std::stoi(argv[++i]); if(value < 1 || value > 65535) return 2; port = value; }
     else if (arg == "--quit-after" && i + 1 < argc) quit_after = std::stod(argv[++i]);
     else if (arg == "--snapshot" && i + 1 < argc) snapshot = argv[++i];
     else if (arg == "--reset-default") reset = true;
+    else if (arg == "--host-viewer" && i + 1 < argc) viewer_parent = std::stoull(argv[++i]);
   }
+  if (viewer_parent) return run_host_viewer(viewer_parent);
   bool audio_enabled = true; // TODO: get from config
   uint32_t sdl_flags = audio_enabled ? SDL_INIT_AUDIO : 0;
   SDL_Init(sdl_flags);

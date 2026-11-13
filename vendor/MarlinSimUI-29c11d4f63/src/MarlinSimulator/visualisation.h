@@ -194,6 +194,7 @@ public:
 };
 
 struct Viewport : public UiWindow {
+  bool standalone = false;
   bool hovered = false;
   bool focused = false;
   ImVec2 viewport_size;
@@ -207,7 +208,12 @@ struct Viewport : public UiWindow {
     if (!active) return;
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2 {0, 0});
-    ImGui::Begin((char*)name.c_str(), nullptr, ImGuiWindowFlags_MenuBar);
+    if (standalone) {
+      auto* viewport = ImGui::GetMainViewport();
+      ImGui::SetNextWindowPos(viewport->Pos);
+      ImGui::SetNextWindowSize(viewport->Size);
+    }
+    ImGui::Begin((char*)name.c_str(), nullptr, standalone ? ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoDocking : ImGuiWindowFlags_MenuBar);
     ImGui::PopStyleVar();
     if (menu_callback) menu_callback(this);
 

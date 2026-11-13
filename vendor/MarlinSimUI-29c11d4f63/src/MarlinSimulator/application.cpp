@@ -14,7 +14,7 @@
 #include <vcd_writer.h>
 #include <regex>
 
-Application::Application() {
+Application::Application(bool viewer) : viewer_only(viewer) {
 
   window.init({.title = "Marlin Simulator"});
   user_interface.init("imgui.ini");
@@ -243,6 +243,11 @@ Application::Application() {
   };
 
   load_preferences();
+  if (viewer_only) {
+    for (auto& panel : user_interface.ui_elements) panel.second->active = panel.first == "Viewport";
+    user_interface.m_main_menu = {};
+    UserInterface::getElement<Viewport>("Viewport")->standalone = true;
+  }
   user_interface.prepare_layout = [this](){ if (layout_pending) reset_layout(); };
 
 }
@@ -273,7 +278,7 @@ void Application::update() {
     }
   }
 
-  sim.update();
+  if (!viewer_only) sim.update();
   user_interface.show();
   if (!ImGui::IsMouseDown(0)) for (char axis : {'X','Y','Z'}) for (bool maximum : {false,true}) {
     const auto name = std::string("Endstop(") + axis + (maximum ? " Max)" : " Min)");
@@ -290,6 +295,7 @@ void Application::render() {
   renderer::gl_assert_call(glClear, GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
   sim.vis.update();               // Update and render
+  if(overlay_render) overlay_render();
   sim.vis.framebuffer->render();  // Render and unbind framebuffer
 
   user_interface.render();

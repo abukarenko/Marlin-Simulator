@@ -11,7 +11,7 @@ internal sealed class MainForm : Form
     private readonly TextBox command = new() { Width = 400, PlaceholderText = "G-code, например M115" };
     private readonly ComboBox ports = new() { Width = 110, DropDownStyle = ComboBoxStyle.DropDownList };
     private readonly ComboBox baudRates = new() { Width = 100, DropDownStyle = ComboBoxStyle.DropDownList };
-    private readonly ComboBox connectionType = new() { Width = 85, DropDownStyle = ComboBoxStyle.DropDownList };
+    private readonly ComboBox connectionType = new() { Width = 115, DropDownStyle = ComboBoxStyle.DropDownList };
     private readonly NumericUpDown tcpPort = new() { Width = 100, Minimum = 1, Maximum = 65535, Value = 7000 };
     private readonly Label connectionHint = new() { AutoSize = true, Padding = new Padding(5, 6, 0, 0) };
     private readonly Label status = new() { AutoSize = true, Text = "Прошивка не подключена", Padding = new Padding(8) };
@@ -67,7 +67,7 @@ internal sealed class MainForm : Form
         }
         var serial = Row(0);
         serial.Controls.Add(new Label { Text = "Подключение:", AutoSize = true, Padding = new Padding(0, 6, 0, 0) });
-        connectionType.Items.AddRange(new object[] { "COM", "TCP" });
+        connectionType.Items.AddRange(new object[] { "Локально", "COM", "TCP" });
         connectionType.SelectedIndex = 0;
         serial.Controls.Add(connectionType);
         serial.Controls.Add(ports);
@@ -96,7 +96,7 @@ internal sealed class MainForm : Form
         command.KeyDown += async (_, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; await Guard(SendInput); } };
         layout.Controls.Add(status, 0, 4);
         Log("Marlin 2.1.2.9 · Cartesian · 220 × 220 × 250 мм · 1 экструдер + нагреваемый стол");
-        Log("Выберите COM или TCP и нажмите «Подключить» — симулятор запустится автоматически.");
+        Log("Для печати файла выберите «Локально» и нажмите «Запустить». COM/TCP — для внешней программы.");
         FormClosing += OnClosing;
         UpdateControls();
         if (persistSettings) RestoreSettings(WindowPreferences.Load());
@@ -112,9 +112,9 @@ internal sealed class MainForm : Form
         restoringSettings = true;
         try
         {
-            if (!ExternalConnected)
+            if (firmware is not { HasExited: false } && !ExternalConnected)
             {
-                connectionType.SelectedItem = settings.Transport == "TCP" ? "TCP" : "COM";
+                connectionType.SelectedItem = connectionType.Items.Contains(settings.Transport) ? settings.Transport : "Локально";
                 if (ports.Items.Contains(settings.Port)) ports.SelectedItem = settings.Port;
                 if (baudRates.Items.Contains(settings.Baud)) baudRates.SelectedItem = settings.Baud;
                 tcpPort.Value = Math.Clamp(settings.TcpPort, 1, 65535);
@@ -232,11 +232,17 @@ internal sealed class MainForm : Form
         changingPort = true; UpdateControls();
         try
         {
-            if (ExternalConnected)
+            if (ExternalConnected || firmware is { HasExited: false })
             {
                 var oldPort = connectedPort;
                 await StopSimulator();
-                Log($"Порт {oldPort} отключён. Симулятор закрыт.");
+                Log(oldPort is null ? "Локальная работа завершена. Симулятор закрыт." : $"Порт {oldPort} отключён. Симулятор закрыт.");
+                return;
+            }
+            if (connectionType.Text == "Локально")
+            {
+                await StartFirmware();
+                Log("Локальный режим: откройте G-code или отправьте команду.");
                 return;
             }
             if (connectionType.Text == "TCP")
@@ -286,7 +292,7 @@ internal sealed class MainForm : Form
 
     private async Task Send(string text)
     {
-        if (session is not { IsConnected: true } current) throw new InvalidOperationException("Сначала нажмите «Подключить».");
+        if (session is not { IsConnected: true } current) throw new InvalidOperationException("Сначала запустите принтер в режиме «Локально».");
         busy = true; UpdateControls();
         try { await current.SendCommandAsync(text); }
         finally { busy = false; UpdateControls(); }
@@ -327,15 +333,17 @@ internal sealed class MainForm : Form
 
     private void UpdateControls()
     {
+        bool local = connectionType.Text == "Локально";
+        bool running = firmware is { HasExited: false } || ExternalConnected;
         bool com = connectionType.Text == "COM";
         ports.Visible = baudRates.Visible = com;
-        tcpPort.Visible = !com;
-        connectionHint.Text = com ? "8N1 · физический или виртуальный порт" : "127.0.0.1 · порт для управляющей программы";
+        tcpPort.Visible = connectionType.Text == "TCP";
+        connectionHint.Text = local ? "Печать G-code без внешней программы" : com ? "8N1 · физический или виртуальный порт" : "127.0.0.1 · порт для управляющей программы";
         foreach (var control in localControls) control.Enabled = session?.IsConnected == true && !busy && !changingPort && !ExternalConnected;
-        bridgeButton.Text = ExternalConnected ? "Отключить" : "Подключить";
+        bridgeButton.Text = running ? (local ? "Остановить" : "Отключить") : local ? "Запустить" : "Подключить";
         bridgeButton.Enabled = !changingPort && !busy;
-        connectionType.Enabled = ports.Enabled = baudRates.Enabled = tcpPort.Enabled = !ExternalConnected && !changingPort;
-        status.Text = tcpConnection is not null ? $"{connectedPort} · ожидание / работа с программой" : bridge is not null ? $"Подключено: {connectedPort} · {baudRates.Text} бод" : session?.IsConnected == true ? "Принтер готов · внешнее подключение отключено" : "Принтер не запущен";
+        connectionType.Enabled = ports.Enabled = baudRates.Enabled = tcpPort.Enabled = !running && !changingPort && !busy;
+        status.Text = tcpConnection is not null ? $"{connectedPort} · ожидание / работа с программой" : bridge is not null ? $"Подключено: {connectedPort} · {baudRates.Text} бод" : session?.IsConnected == true ? "Локальный режим · принтер готов" : "Принтер не запущен";
     }
 
     private void Ui(Action action) { if (!IsDisposed && IsHandleCreated) BeginInvoke(() => { if (!IsDisposed) action(); }); }

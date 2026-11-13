@@ -4,7 +4,7 @@ namespace MarlinEmulator.App;
 
 internal sealed class WindowPreferences
 {
-    public string Transport { get; set; } = "COM";
+    public string Transport { get; set; } = "Локально";
     public string Port { get; set; } = "";
     public string Baud { get; set; } = "115200";
     public int TcpPort { get; set; } = 7000;

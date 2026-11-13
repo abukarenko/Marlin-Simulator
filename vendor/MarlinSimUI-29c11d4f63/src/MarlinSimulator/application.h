@@ -48,7 +48,7 @@ public:
 
 class Application {
 public:
-  Application();
+  Application(bool viewer = false);
   ~Application();
 
   void update();
@@ -71,6 +71,8 @@ public:
   std::chrono::steady_clock::time_point last_save = std::chrono::steady_clock::now();
 
   bool active = true;
+  bool viewer_only = false;
+  std::function<void()> overlay_render;
   Window window;
   UserInterface user_interface;
   Simulation sim;

@@ -460,7 +460,7 @@ void Visualisation::ui_viewport_callback(UiWindow* window) {
         follow_offset = camera.position - glm::vec3(ex.position);
     }
     if (ImGui::GetIO().MouseWheel != 0 && viewport.hovered) {
-      camera.position += 10.0f * camera.speed * camera.direction * delta * ImGui::GetIO().MouseWheel;
+      camera.position += 10.0f * camera.speed * camera.direction * (viewport.standalone ? 1.f/60.f : delta) * ImGui::GetIO().MouseWheel;
     }
   }
 
@@ -476,17 +476,22 @@ void Visualisation::ui_viewport_callback(UiWindow* window) {
   if (mouse_captured && !last_mouse_captured) {
     ImVec2 mouse_pos = ImGui::GetMousePos();
     mouse_lock_pos = {mouse_pos.x, mouse_pos.y};
-    SDL_SetWindowGrab(SDL_GL_GetCurrentWindow(), SDL_TRUE);
-    SDL_SetRelativeMouseMode(SDL_TRUE);
-    SDL_GetRelativeMouseState(nullptr, nullptr);
+    if (!viewport.standalone) {
+      SDL_SetWindowGrab(SDL_GL_GetCurrentWindow(), SDL_TRUE);
+      SDL_SetRelativeMouseMode(SDL_TRUE);
+      SDL_GetRelativeMouseState(nullptr, nullptr);
+    }
   } else if (!mouse_captured && last_mouse_captured) {
-    SDL_SetRelativeMouseMode(SDL_FALSE);
-    SDL_SetWindowGrab(SDL_GL_GetCurrentWindow(), SDL_FALSE);
-    SDL_WarpMouseInWindow(SDL_GL_GetCurrentWindow(), mouse_lock_pos.x, mouse_lock_pos.y);
-    SDL_GetRelativeMouseState(nullptr, nullptr);
+    if (!viewport.standalone) {
+      SDL_SetRelativeMouseMode(SDL_FALSE);
+      SDL_SetWindowGrab(SDL_GL_GetCurrentWindow(), SDL_FALSE);
+      SDL_WarpMouseInWindow(SDL_GL_GetCurrentWindow(), mouse_lock_pos.x, mouse_lock_pos.y);
+      SDL_GetRelativeMouseState(nullptr, nullptr);
+    }
   } else if (mouse_captured) {
     int rel_x, rel_y;
-    SDL_GetRelativeMouseState(&rel_x, &rel_y);
+    if(viewport.standalone) { rel_x=int(ImGui::GetIO().MouseDelta.x); rel_y=int(ImGui::GetIO().MouseDelta.y); }
+    else SDL_GetRelativeMouseState(&rel_x, &rel_y);
     const glm::vec3 center{build_plate_dimension.x * 0.5f, 0.0f, -build_plate_dimension.y * 0.5f};
     if (captured_mouse_button == 1) {
       camera.update_view();

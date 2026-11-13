@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include <SDL2/SDL.h>
 #include <glad/glad.h>
 
@@ -49,6 +50,7 @@ WindowReturnCode sdl_window_create(WindowConfig config = {}) {
   SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
 
   SDL_WindowFlags window_flags = (SDL_WindowFlags)(SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+  if (std::getenv("MARLIN_VIEWER_EMBEDDED")) window_flags = (SDL_WindowFlags)(window_flags | SDL_WINDOW_HIDDEN);
   window = SDL_CreateWindow((char *)config.title.c_str(), SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 720, window_flags);
   if (window == nullptr) {
     logger::error("SDL_CreateWindow: Failed to Create Window (%s), retrying without multisampling (fallback)", SDL_GetError());
