@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType></PropertyGroup>
+  <ItemGroup><ProjectReference Include="../../src/MarlinEmulator.Core/MarlinEmulator.Core.csproj" /></ItemGroup>
+  <ItemGroup>
+    <Compile Include="../../src/MarlinEmulator.App/SerialBridge.cs" Link="SerialBridge.cs" />
+    <Compile Include="../../src/MarlinEmulator.App/WindowPreferences.cs" Link="WindowPreferences.cs" />
+    <PackageReference Include="System.IO.Ports" Version="10.0.0" />
+  </ItemGroup>
+</Project>
