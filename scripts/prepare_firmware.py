@@ -25,6 +25,7 @@ def main():
     advanced = MARLIN / 'Marlin' / 'Configuration_adv.h'
     text = advanced.read_text(encoding='utf-8')
     text = re.sub(r'^(\s*)//#define EMERGENCY_PARSER\b', r'\1#define EMERGENCY_PARSER', text, flags=re.M)
+    text = re.sub(r'^(\s*)//#define M114_REALTIME\b', r'\1#define M114_REALTIME', text, flags=re.M)
     advanced.write_text(text, encoding='utf-8')
     (ROOT / 'config').mkdir(exist_ok=True)
     for name in ('Configuration.h', 'Configuration_adv.h'):

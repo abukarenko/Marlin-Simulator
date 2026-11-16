@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Text.RegularExpressions;
@@ -13,10 +13,47 @@ static async Task Until(Func<bool> condition, int seconds = 10)
     while (!condition()) { if (DateTime.UtcNow > deadline) throw new TimeoutException("State timeout"); await Task.Delay(10); }
 }
 
+if(args.Contains("--motion"))
+{
+    double now=0;
+    var motion=new MotionPreview(()=>now);
+    motion.Settings(["echo: M92 X80 Y80 Z400 E95","M201 X10 Y20 Z5 E100","M203 X100 Y100 Z5 E25","M204 P20 R30 T100"]);
+    Check(motion.Limits.HasSteps && motion.Limits.HasAcceleration && motion.Limits.Steps[2]==400,"M503 limits missing");
+    motion.Observe(["X:0 Y:0 Z:0 E:0"],true);
+    motion.Accept("G90"); motion.Accept("G0 X100 F10");
+    now=60;
+    Check(Math.Abs(motion.Position.X-10)<.02,"F10 must travel about 10 mm per minute");
+    motion.Observe(["X:100 Y:0 Z:0 E:0 Count X:8000 Y:0 Z:0"],true);
+    Check(!motion.RealtimeObserved && Math.Abs(motion.Position.X-10)<.02,"Projected M114 endpoint short-circuited slow movement");
+    motion.Accept("G92 E0");
+    Check(Math.Abs(motion.Position.X-10)<.02,"G92 E reset XYZ animation");
+    now=300; Check(Math.Abs(motion.Position.X-50)<.02,"Slow movement midpoint wrong");
+    now=601; Check(Math.Abs(motion.Position.X-100)<.001,"Slow movement did not finish");
+    var limits=motion.Limits;
+    var profile=new MotionProfile(System.Numerics.Vector3.Zero,new(100,0,0),0,600,100,limits,0);
+    Check(Math.Abs(profile.Duration-11)<1e-5 && Math.Abs(profile.At(.5).X-1.25)<1e-5,"Axis acceleration/trapezoid wrong");
+    limits.Apply("M203 X2");
+    profile=new MotionProfile(System.Numerics.Vector3.Zero,new(100,0,0),0,600,100,limits,0);
+    Check(Math.Abs(profile.Duration-50.2)<1e-5,"M203 axis speed cap wrong");
+    now=0; var scaled=new MotionPreview(()=>now); scaled.Observe(["X:20 Y:0 Z:0 E:0"],true);
+    scaled.Accept("G91"); scaled.Accept("M220 S50"); scaled.Accept("G1 X10 F60");
+    now=10; Check(Math.Abs(scaled.Position.X-25)<.01,"Relative motion or M220 wrong");
+    var stopped=scaled.Position; scaled.Stop(); now=30; Check(scaled.Position==stopped,"Stopped head kept moving");
+    now=0; var actual=new MotionPreview(()=>now); actual.Observe(["X:0 Y:0 Z:0 E:0"],true); actual.Accept("G0 X100 F10");
+    now=1; actual.Observe(["X:0.16 Y:0 Z:0 E:0"],true);
+    Check(actual.RealtimeObserved && Math.Abs(actual.Position.X-.16)<.001,"Intermediate realtime position not used");
+    now=2; actual.Observe(["X:0.33 Y:0 Z:0 E:0"],true);
+    Check(Math.Abs(actual.Position.X-.33)<.001,"Realtime sample did not correct estimate");
+    actual.Observe(["X:100 Y:0 Z:0 E:0"],true); Check(actual.Position.X==100,"Realtime endpoint ignored");
+    Console.WriteLine("PASS motion: F10 ten-minute move with virtual clock, projected/realtime M114, M92/M201/M203/M204, ramps, M220, relative moves, G92 E, stop.");
+    return;
+}
+
 if (args.Contains("--ui"))
 {
     var uiListener = new TcpListener(IPAddress.Loopback, 0); uiListener.Start();
     int uiPort = ((IPEndPoint)uiListener.LocalEndpoint).Port;
+    var uiCommands = new System.Collections.Concurrent.ConcurrentQueue<string>();
     var serving = Task.Run(async () =>
     {
         using var client = await uiListener.AcceptTcpClientAsync();
@@ -24,6 +61,9 @@ if (args.Contains("--ui"))
         using var writer = new StreamWriter(client.GetStream()) { AutoFlush = true };
         while (await reader.ReadLineAsync() is { } command)
         {
+            uiCommands.Enqueue(command);
+            if (command.Contains("M115")) await writer.WriteLineAsync("FIRMWARE_NAME:Marlin terminal-test");
+            if (command.Contains("M503")) await writer.WriteLineAsync("echo:Steps per unit:\nM92 X80 Y80 Z400 E93");
             if (command.Contains("M211")) await writer.WriteLineAsync("  Min: X0 Y0 Z0  Max: X220 Y220 Z250");
             if (command.Contains("M105")) await writer.WriteLineAsync("T:205.0 /230.0 B:85.0 /85.0");
             if (command.Contains("M114")) await writer.WriteLineAsync("X:20.00 Y:30.00 Z:2.00 E:5.00");
@@ -54,6 +94,56 @@ if (args.Contains("--ui"))
                     Check(((ComboBox)Field("transport")).Text == "TCP", "Transport selector lost value");
                     Check(((Button)Field("printButton")).Enabled, "Print button disabled after load and connection");
                     Check(((Label)Field("temperatures")).Text.Contains("205"), "Temperature telemetry absent");
+                    var stepSelector=(ComboBox)Field("step"); var feedSelector=(ComboBox)Field("jogFeed");
+                    Check(stepSelector.Text=="5" && feedSelector.Text=="5000","Jog defaults differ");
+                    Check(stepSelector.Items.Cast<string>().SequenceEqual(new[]{"0,05","0,1","0,5","1","5","10","50","100"}),"Step presets differ");
+                    Check(feedSelector.Items.Cast<string>().SequenceEqual(new[]{"50","100","500","1000","5000","10000","50000"}),"Feed presets differ");
+                    IEnumerable<Control> Descendants(Control parent)=>parent.Controls.Cast<Control>().SelectMany(c=>new[]{c}.Concat(Descendants(c)));
+                    var jogX=Descendants(form).OfType<Button>().Single(b=>b.Text=="X+");
+                    jogX.PerformClick(); await Until(()=>uiCommands.Any(c=>c.Contains("G1 X5 F5000")));
+                    stepSelector.Text="0,05"; feedSelector.Text="50000";
+                    jogX.PerformClick(); await Until(()=>uiCommands.Any(c=>c.Contains("G1 X0.05 F50000")));
+                    stepSelector.Text="0.25"; feedSelector.Text="1234.5";
+                    jogX.PerformClick(); await Until(()=>uiCommands.Any(c=>c.Contains("G1 X0.25 F1234.5")));
+                    await Task.Delay(150);
+                    int moves=uiCommands.Count(c=>c.Contains("G1 X"));
+                    stepSelector.Text="invalid"; jogX.PerformClick(); await Task.Delay(150);
+                    Check(uiCommands.Count(c=>c.Contains("G1 X"))==moves,"Invalid selector text sent movement");
+                    stepSelector.Text="5"; feedSelector.Text="5000";
+                    Console.WriteLine("PASS jog selectors: presets/defaults, comma/point/custom values, 50000 feed and rejected invalid input.");
+                    var terminalToggle=(CheckBox)Field("terminal");
+                    var terminalLog=(RichTextBox)Field("journal");
+                    var commandInput=(ComboBox)Field("input");
+                    terminalToggle.Checked=true; terminalLog.Clear();
+                    await Task.Delay(2200);
+                    Check(!terminalLog.Text.Contains("←") && !terminalLog.Text.Contains("→"),"Background polling leaked into terminal");
+                    commandInput.Text="M115"; await Call("SendInput");
+                    await Until(()=>terminalLog.Text.Contains("← ok"));
+                    Check(terminalLog.Text.Contains("→ M115") && terminalLog.Text.Contains("FIRMWARE_NAME:Marlin terminal-test"),"Manual terminal response missing");
+                    terminalLog.Clear(); commandInput.Text="M105"; await Call("SendInput");
+                    await Until(()=>terminalLog.Text.Contains("← T:205.0"));
+                    Check(terminalLog.Text.Contains("→ M105"),"Explicit status query was filtered");
+                    terminalLog.Clear(); commandInput.Text="M503"; await Call("SendInput");
+                    await Until(()=>terminalLog.Text.Contains("M92 X80 Y80 Z400 E93"));
+                    Check(terminalLog.Text.Contains("echo:Steps per unit:"),"Multiline response truncated");
+                    terminalToggle.Checked=false; terminalLog.Clear();
+                    commandInput.Text="M115"; await Call("SendInput"); await Task.Delay(100);
+                    Check(!terminalLog.Text.Contains("FIRMWARE_NAME:"),"Terminal switch did not hide responses");
+                    Console.WriteLine("PASS terminal: polling including ACK hidden, explicit M105 visible, M115 and multiline M503 replies, toggle off.");
+                    var motorToggle=(CheckBox)Field("motors");
+                    Check(motorToggle.Checked && motorToggle.Enabled,"Motor ON not selected by default");
+                    motorToggle.Checked=false;
+                    await Until(()=>uiCommands.Any(c=>c.Contains("M84")) && motorToggle.Enabled);
+                    Check(!motorToggle.Checked && motorToggle.Text=="Motor OFF","Motor off state not retained after acknowledgement");
+                    motorToggle.Checked=true;
+                    await Until(()=>uiCommands.Any(c=>c.Contains("M17")) && motorToggle.Enabled);
+                    Check(motorToggle.Checked && motorToggle.Text=="Motor ON","Motor on state not retained after acknowledgement");
+                    commandInput.Text="M84"; await Call("SendInput");
+                    await Until(()=>!motorToggle.Checked);
+                    commandInput.Text="M17"; await Call("SendInput"); await Until(()=>motorToggle.Checked);
+                    commandInput.Text="M84 S30"; await Call("SendInput"); await Task.Delay(150);
+                    Check(motorToggle.Checked,"Motor timeout command incorrectly treated as immediate off");
+                    Console.WriteLine("PASS motors: default ON, switch sends M84/M17, terminal commands synchronize state, timeout preserves enabled state.");
                     string path = Path.GetFullPath("artifacts/host-ui-qa/connected.png"); Directory.CreateDirectory(Path.GetDirectoryName(path)!);
                     await (Task)typeof(HostForm).GetMethod("SaveSnapshot",BindingFlags.NonPublic|BindingFlags.Instance)!.Invoke(form,[path])!;
                     var view=Field("preview");
@@ -62,11 +152,30 @@ if (args.Contains("--ui"))
                     await Task.Delay(2200); // Exclude scene import and synchronous screenshot from the FPS window.
                     ((System.Windows.Forms.Timer)Field("timer")).Stop();
                     await Task.Delay(250); // Drain the last telemetry reply before the synthetic head sample.
+                    void Endstop(string sample)=>typeof(HostForm).GetMethod("Receive",BindingFlags.NonPublic|BindingFlags.Instance)!.Invoke(form,[sample]);
+                    async Task WaitEndstops(int mask)
+                    {
+                        for(int i=0;i<40;i++)
+                        {
+                            view.GetType().GetMethod("Send")!.Invoke(view,["STATS"]); await Task.Delay(50);
+                            string reply=(string)view.GetType().GetProperty("RendererStats")!.GetValue(view)!;
+                            if(Regex.IsMatch(reply,@"endstops="+mask+@"\b")) return;
+                        }
+                        throw new Exception("Endstop overlay did not update: "+mask+" actual="+view.GetType().GetProperty("RendererStats")!.GetValue(view));
+                    }
+                    Endstop("z_min: open"); Endstop("x_max: TRIGGERED"); Endstop("z_max: TRIGGERED");
+                    await WaitEndstops(34);
+                    string endstopShot=Path.GetFullPath("artifacts/host-ui-qa/endstops.png");
+                    await (Task)typeof(HostForm).GetMethod("SaveSnapshot",BindingFlags.NonPublic|BindingFlags.Instance)!.Invoke(form,[endstopShot])!;
+                    Endstop("x_max: open"); await WaitEndstops(32);
+                    Endstop("z_max: open"); await WaitEndstops(0);
+                    Console.WriteLine("PASS endstops: X+/Z+ native overlay, individual release and all-open hiding.");
                     view.GetType().GetProperty("Head")!.SetValue(view,new System.Numerics.Vector3(80,70,10));
                     await Task.Delay(200);
+                    string beforeStats=(string)view.GetType().GetProperty("RendererStats")!.GetValue(view)!;
                     view.GetType().GetMethod("Send")!.Invoke(view,["STATS"]);
                     string stats="";
-                    for(int i=0;i<30;i++) { stats=(string)view.GetType().GetProperty("RendererStats")!.GetValue(view)!; if(stats.Length>0) break; await Task.Delay(50); }
+                    for(int i=0;i<30;i++) { stats=(string)view.GetType().GetProperty("RendererStats")!.GetValue(view)!; if(stats.Length>0 && stats!=beforeStats) break; await Task.Delay(50); }
                     var measured=Regex.Match(stats,@"fps=([\d.]+) heads=(\d+) interpolated=(\d+)");
                     Check(measured.Success && double.Parse(measured.Groups[1].Value,System.Globalization.CultureInfo.InvariantCulture)>0 && int.Parse(measured.Groups[2].Value)>5 && int.Parse(measured.Groups[3].Value)>0,"Renderer/polling/interpolation statistics missing: "+stats);
                     Check(double.Parse(measured.Groups[1].Value,System.Globalization.CultureInfo.InvariantCulture)<=32,"Viewer exceeded 30 FPS budget");
@@ -97,7 +206,35 @@ if (args.Contains("--ui"))
                     view.GetType().GetProperty("Progress")!.SetValue(view,0);
                     await WaitVisual(n=>n==0);
                     Console.WriteLine("PASS viewer: ghost before print, partial/full coloring, reset, visible cursor and 30 FPS cap.");
+                    var heater=(TemperatureControl)Field("nozzleTemperature");
+                    var heaterTarget=(NumericUpDown)Field("nozzle");
+                    var heaterOn=(CheckBox)Field("nozzleOn");
+                    Check(heater.ActualTemperature==205,"Temperature marker differs from sensor");
+                    heaterOn.Checked=false;
+                    await Until(()=>uiCommands.Any(c=>c.Contains("M104 S0")));
+                    heaterTarget.Value=225;
+                    heaterOn.Checked=true;
+                    await Until(()=>uiCommands.Any(c=>c.Contains("M104 S225")));
+                    typeof(TemperatureControl).GetMethod("OnKeyDown",BindingFlags.NonPublic|BindingFlags.Instance)!.Invoke(heater,[new KeyEventArgs(Keys.Right)]);
+                    await Until(()=>uiCommands.Any(c=>c.Contains("M104 S226")));
+                    Check(heaterTarget.Value==226 && heater.ActualTemperature==205,"Setpoint editing changed sensor reading");
+                    heaterOn.Checked=false;
+                    await Task.Delay(100);
+                    Check(heaterTarget.Value==226,"Turning heat off erased stored target");
+                    heater.SetReportedTemperature(100,0);
+                    Check(heaterTarget.Value==226 && heater.ActualTemperature==100,"Off telemetry erased remembered target");
+                    ((ComboBox)Field("input")).Focus();
+                    heater.SetReportedTemperature(101,240);
+                    Check(heaterTarget.Value==240,"Print target not reflected by setpoint");
+                    var bedOn=(CheckBox)Field("bedOn"); bedOn.Checked=false;
+                    await Until(()=>uiCommands.Any(c=>c.Contains("M140 S0")));
+                    ((NumericUpDown)Field("bed")).Value=80; bedOn.Checked=true;
+                    await Until(()=>uiCommands.Any(c=>c.Contains("M140 S80")));
+                    Console.WriteLine("PASS heaters: sensor marker, setpoint keyboard, T0/bed commands and retained target after heat off.");
+                    Endstop("z_max: TRIGGERED"); await WaitEndstops(32);
                     await Call("Disconnect");
+                    await WaitEndstops(0);
+                    Check(heater.ActualTemperature is null,"Stale temperature after disconnect");
                     Check(!((Button)Field("printButton")).Enabled, "Print allowed after disconnect");
                     Console.WriteLine("PASS UI: connection, file import, print availability, temperature telemetry, disconnect and layout snapshot.");
                     done.TrySetResult();
@@ -135,6 +272,73 @@ if (args.Contains("--import"))
     File.WriteAllText(final, "changed later");
     Check(File.ReadAllText(snapshot!) == "G28\nG1 X20\n", "Job snapshot not isolated");
     Console.WriteLine("PASS: PrusaSlicer postprocessor waits for final export, delivers through IPC, keeps immutable snapshot.");
+    return;
+}
+
+if(args.Contains("--native-motion") || args.Contains("--native-motion-fast"))
+{
+    string folder=Path.GetFullPath("artifacts/host-motion-native-qa"); Directory.CreateDirectory(folder);
+    bool accelerated=args.Contains("--native-motion-fast");
+    File.WriteAllText(Path.Combine(folder,"simulator.settings"),accelerated ? "speed=30\n" : "speed=1\n");
+    var start=new ProcessStartInfo(Path.GetFullPath("dist/host/viewer/MarlinViewer.exe")) { WorkingDirectory=folder,UseShellExecute=false,CreateNoWindow=true,WindowStyle=ProcessWindowStyle.Hidden };
+    start.ArgumentList.Add("--port"); start.ArgumentList.Add("18201"); start.ArgumentList.Add("--quit-after"); start.ArgumentList.Add("60");
+    using var firmware=Process.Start(start)!;
+    try
+    {
+        await Task.Delay(1800);
+        await using var relay=new MarlinEmulator.Core.TcpConnection(0,18201); relay.Start();
+        await using var link=new PrinterLink(); await link.ConnectTcp("127.0.0.1",relay.Port);
+        var controller=new PrintController(link); await controller.Initialize();
+        Check(controller.Motion.Limits.HasSteps && controller.Motion.Limits.HasAcceleration,"Actual M503 not parsed");
+        if(accelerated)
+        {
+            await controller.Manual("G21\nG90\nG92 X0 Y0 Z0\nG0 X100 F10");
+            double x=0;
+            for(int i=0;i<10;i++)
+            {
+                await Task.Delay(100);
+                var report=await controller.Manual("M114 R",true,background:true);
+                var match=Regex.Match(string.Join(" ",report),@"X:\s*([-\d.]+)");
+                x=double.Parse(match.Groups[1].Value,System.Globalization.CultureInfo.InvariantCulture);
+                Check(Math.Abs(controller.Position.X-x)<.025,"Host differs from accelerated simulator");
+            }
+            Check(controller.Motion.RealtimeObserved && x>1 && x<100,"Accelerated telemetry not detected");
+            await controller.Manual("M410\nM114 R");
+            Console.WriteLine("PASS native motion at speed=30: F10 follows actual firmware clock, not host wall-clock estimate.");
+            return;
+        }
+        await controller.Manual("G21\nG90\nG92 X0 Y0 Z0\nG0 X2 F60");
+        var watch=System.Diagnostics.Stopwatch.StartNew();
+        bool intermediate=false;
+        double previous=-1;
+        while(watch.Elapsed.TotalSeconds<1.8)
+        {
+            var report=await controller.Manual("M114 R",true,background:true);
+            var match=Regex.Match(string.Join(" ",report),@"X:\s*([-\d.]+)");
+            Check(match.Success,"No native realtime coordinates");
+            double x=double.Parse(match.Groups[1].Value,System.Globalization.CultureInfo.InvariantCulture);
+            Check(x>=previous-.02,"Native position moved backwards"); previous=x;
+            if(x>.03 && x<1.9) intermediate=true;
+            Check(Math.Abs(controller.Motion.Position.X-x)<.025,"Host head differs from firmware realtime position");
+            await Task.Delay(100);
+        }
+        Check(intermediate && controller.Motion.RealtimeObserved,"M114 R returned only projected endpoints");
+        Check(previous<2 && previous>.3,"Native 1 mm/s speed not observed");
+        await controller.Manual("M400\nM114 R");
+        Check(Math.Abs(controller.Motion.Position.X-2)<.025,"Native endpoint wrong");
+        await controller.Manual("G0 X3 F10");
+        await Task.Delay(1000);
+        var slow=await controller.Manual("M114 R",true,background:true);
+        var slowMatch=Regex.Match(string.Join(" ",slow),@"X:\s*([-\d.]+)");
+        double slowX=double.Parse(slowMatch.Groups[1].Value,System.Globalization.CultureInfo.InvariantCulture);
+        Check(slowX>2.02 && slowX<2.4 && Math.Abs(controller.Motion.Position.X-slowX)<.025,"Native F10 preview moved too fast");
+        await controller.Manual("M410\nM114 R");
+        float stoppedX=controller.Motion.Position.X;
+        await Task.Delay(300); await controller.Manual("M114 R",true,background:true);
+        Check(Math.Abs(controller.Motion.Position.X-stoppedX)<.025,"Preview continued after native quick stop");
+        Console.WriteLine("PASS native motion: actual M503, M114 R, F60/F10 speeds, host/stepper agreement, endpoint and M410 stop.");
+    }
+    finally { if(!firmware.HasExited) firmware.Kill(true); await firmware.WaitForExitAsync(); }
     return;
 }
 

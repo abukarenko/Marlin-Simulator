@@ -1,4 +1,4 @@
-using System.ComponentModel;
+﻿using System.ComponentModel;
 using System.Diagnostics;
 using System.Numerics;
 using System.Text;
@@ -16,6 +16,13 @@ internal sealed class NativePreview : Panel
     public PrintJob? Job { get => job; set { job = value; if (IsHandleCreated) LoadScene(); } }
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public int Progress { get => progress; set { if(progress==value) return; progress=value; Send("PROGRESS "+value); } }
+    private int endstopMask;
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public int EndstopMask
+    {
+        get => endstopMask;
+        set { int next=value&63; if(next==endstopMask) return; endstopMask=next; Send("ENDSTOPS "+next); }
+    }
     private int progress;
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public Vector3? Head { get => head; set { head = value; if (value is Vector3 p) Send($"HEAD {GCode.N(p.X)} {GCode.N(p.Y)} {GCode.N(p.Z)}"); } }
@@ -51,7 +58,7 @@ internal sealed class NativePreview : Panel
                 if (args.Data?.StartsWith("VIEWER_STATS") == true) Volatile.Write(ref rendererStats,args.Data);
             };
             process.BeginOutputReadLine(); process.BeginErrorReadLine();
-            notice.Visible = false; LoadScene();
+            notice.Visible = false; LoadScene(); Send("ENDSTOPS "+endstopMask);
         }
         catch (Exception ex) { notice.Text = ex.Message; notice.Visible = true; }
     }

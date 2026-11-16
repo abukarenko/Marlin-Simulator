@@ -12,6 +12,7 @@ public sealed class HostSettings
     public int FanIndex { get; set; }
     public string Slicer { get; set; } = "";
     public bool AutoStandby { get; set; }
+    public bool Terminal { get; set; }
     public int StandbyNozzle { get; set; } = 100;
     public int StandbyBed { get; set; } = 50;
     public double Yaw { get; set; } = -0.8;

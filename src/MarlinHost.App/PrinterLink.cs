@@ -16,6 +16,7 @@ public sealed class PrinterLink : IAsyncDisposable
     private readonly SemaphoreSlim writes = new(1);
     private readonly object sync = new();
     private TaskCompletionSource<string[]>? pending;
+    private bool pendingTerminal;
     private readonly List<string> replies = [];
     private int? resend;
     private int number;
@@ -25,6 +26,7 @@ public sealed class PrinterLink : IAsyncDisposable
     public event Action<string>? Received;
     public event Action<string>? Sent;
     public event Action<string>? Lost;
+    public event Action<string, bool>? TerminalTraffic;
 
     public async Task ConnectTcp(string host, int port)
     {
@@ -82,6 +84,9 @@ public sealed class PrinterLink : IAsyncDisposable
 
     private void ProcessLine(string line)
     {
+        bool terminal;
+        lock (sync) terminal = pending is not null && pendingTerminal;
+        if (terminal) TerminalTraffic?.Invoke(line, true);
         Received?.Invoke(line);
         lock (sync)
         {
@@ -109,7 +114,7 @@ public sealed class PrinterLink : IAsyncDisposable
         Lost?.Invoke(reason);
     }
 
-    public async Task<string[]> Send(string command)
+    public async Task<string[]> Send(string command, bool terminal = false)
     {
         if (command.IndexOfAny(['\r', '\n']) >= 0) throw new ArgumentException("Одна команда на строку.");
         if (numbered && GCode.Op(command) == "M110") throw new ArgumentException("M110 управляется приложением и недоступна вручную.");
@@ -124,7 +129,8 @@ public sealed class PrinterLink : IAsyncDisposable
             for (int retry = 0; retry < 4; retry++)
             {
                 var completion = new TaskCompletionSource<string[]>(TaskCreationOptions.RunContinuationsAsynchronously);
-                lock (sync) { pending = completion; replies.Clear(); resend = null; }
+                lock (sync) { pending = completion; pendingTerminal = terminal; replies.Clear(); resend = null; }
+                if (terminal) TerminalTraffic?.Invoke(command, false);
                 await Raw(wire);
                 Sent?.Invoke(command);
                 var result = await completion.Task.WaitAsync(TimeSpan.FromMinutes(15), lifetime.Token);

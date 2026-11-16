@@ -25,6 +25,7 @@ public sealed class ModalState
     public Vector3 Position { get; private set; }
     public double E { get; private set; }
     public ModalState Copy() => (ModalState)MemberwiseClone();
+    internal void SetPosition(Vector3 position, double? e = null) { Position = position; if(e.HasValue) E=e.Value; }
     public void Apply(string line)
     {
         var w = GCode.Words(line); string op = GCode.Op(line);
@@ -111,7 +112,7 @@ public sealed record PrintJob(string FileName, string[] Commands, List<PathSegme
         return new(path, lines, segments, arcs) { FilamentColor=filament };
     }
 
-    private static List<Vector3> Arc(Vector3 start, Vector3 end, string command, int plane, double unit)
+    internal static List<Vector3> Arc(Vector3 start, Vector3 end, string command, int plane, double unit)
     {
         Vector3 Project(Vector3 p) => plane switch { 18 => new(p.Z, p.X, p.Y), 19 => new(p.Y, p.Z, p.X), _ => p };
         Vector3 Unproject(Vector3 p) => plane switch { 18 => new(p.Y, p.Z, p.X), 19 => new(p.Z, p.X, p.Y), _ => p };

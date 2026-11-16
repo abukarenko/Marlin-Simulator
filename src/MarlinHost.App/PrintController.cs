@@ -11,6 +11,7 @@ public sealed class PrintController
     private readonly SemaphoreSlim operation = new(1);
     private volatile bool pauseRequested;
     private volatile bool cancelRequested;
+    private volatile bool emergencyRequested;
     private TaskCompletionSource wake = NewSignal();
     private ModalState modal = new();
     public JobState State { get; private set; }
@@ -22,9 +23,11 @@ public sealed class PrintController
     public double? MaxY { get; private set; }
     public double? MinX { get; private set; }
     public double? MinY { get; private set; }
-    public Vector3 Position { get; private set; }
+    public Vector3 Position => Motion.Position;
+    public MotionPreview Motion { get; } = new();
     public int Speed { get; private set; } = 100;
     public int Flow { get; private set; } = 100;
+    public bool MotorsEnabled { get; private set; } = true;
     public double NozzleTarget { get; private set; }
     public double BedTarget { get; private set; }
     public event Action? Changed;
@@ -33,17 +36,25 @@ public sealed class PrintController
     public PrintController(PrinterLink link)
     {
         this.link = link;
-        link.Lost += _ => { cancelRequested = true; wake.TrySetResult(); if (Active) SetState(JobState.Faulted); };
+        link.Lost += _ => { Motion.Stop(); cancelRequested = true; wake.TrySetResult(); if (Active) SetState(JobState.Faulted); };
     }
 
     private void SetState(JobState state) { State = state; Changed?.Invoke(); }
-    private async Task<string[]> Send(string command, bool track = true)
+    private async Task<string[]> Send(string command, bool track = true, bool terminal = false)
     {
-        var replies = await link.Send(command);
+        if(emergencyRequested) throw new IOException("Аварийная остановка. Соединение необходимо перезапустить.");
+        var replies = await link.Send(command, terminal);
+        if(emergencyRequested) throw new IOException("Аварийная остановка.");
+        Motion.Accept(command,replies);
+        if(GCode.Op(command)=="M503") Motion.Settings(replies);
+        if(GCode.Op(command) is "M501" or "M502") await Send("M503 S0");
         if (track) modal.Apply(command);
         var words = GCode.Words(command);
         switch (GCode.Op(command))
         {
+            case "M17": MotorsEnabled = true; break;
+            case "M18": case "M84": if (!words.ContainsKey('S')) MotorsEnabled = false; break;
+            case "G0": case "G1": case "G2": case "G3": case "G28": MotorsEnabled = true; break;
             case "M220": if (words.TryGetValue('S', out var speed)) Speed = (int)speed; break;
             case "M221": if (words.TryGetValue('S', out var flow)) Flow = (int)flow; break;
             case "M104": case "M109": if (words.TryGetValue('S', out var nozzle) || words.TryGetValue('R', out nozzle)) NozzleTarget = nozzle; break;
@@ -59,8 +70,9 @@ public sealed class PrintController
         try
         {
             await ReadBounds();
+            await Send("M503 S0");
             await Send("M105");
-            await Send("M114");
+            await Send("M114 R");
             await Send("M119");
         }
         finally { operation.Release(); }
@@ -79,7 +91,7 @@ public sealed class PrintController
         }
     }
 
-    public async Task<string[]> Manual(string script, bool live = false)
+    public async Task<string[]> Manual(string script, bool live = false, bool background = false)
     {
         await operation.WaitAsync();
         try
@@ -89,7 +101,7 @@ public sealed class PrintController
             if (live && commands.Any(c => GCode.Op(c) is not ("M105" or "M114" or "M119" or "M104" or "M140" or "M106" or "M107" or "M220" or "M221")))
                 throw new InvalidOperationException("Эта команда не разрешена во время печати.");
             var result = new List<string>();
-            foreach (string command in commands) result.AddRange(await Send(command));
+            foreach (string command in commands) result.AddRange(await Send(command, terminal: !background));
             return result.ToArray();
         }
         finally { operation.Release(); }
@@ -245,7 +257,9 @@ public sealed class PrintController
 
     public async Task Emergency()
     {
+        emergencyRequested = true;
         cancelRequested = true; wake.TrySetResult();
+        Motion.Stop();
         await link.Raw("M112");
         SetState(JobState.Faulted);
         await link.DisposeAsync();

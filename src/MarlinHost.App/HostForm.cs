@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.IO.Ports;
 using System.Numerics;
 using System.Text.RegularExpressions;
@@ -17,6 +17,8 @@ public sealed class HostForm : Form
     private readonly Label fileLabel = new() { AutoSize = true, Padding = new Padding(4, 8, 0, 0), MaximumSize = new Size(500, 50) };
     private readonly Label temperatures = new() { AutoSize = true, Text = "Сопло — / — °C\nСтол — / — °C", Padding = new Padding(5), Font = new Font("Segoe UI", 12) };
     private readonly RichTextBox journal = new() { Dock = DockStyle.Fill, ReadOnly = true, BackColor = Color.FromArgb(246, 248, 250), Font = new Font("Consolas", 9) };
+    private readonly CheckBox terminal = new() { Text = "Терминал", AutoSize = true };
+    private volatile bool terminalEnabled;
     private readonly CheckBox details = new() { Text = "Подробный обмен", AutoSize = true };
     private readonly CheckBox standby = new() { Text = "Поддерживать температуру при простое", AutoSize = true };
     private readonly NumericUpDown nozzle = Num(230, 0, 300);
@@ -25,8 +27,8 @@ public sealed class HostForm : Form
     private readonly NumericUpDown fanIndex = Num(0, 0, 7);
     private readonly NumericUpDown speed = Num(100, 10, 300);
     private readonly NumericUpDown flow = Num(100, 10, 200);
-    private readonly NumericUpDown step = Num(10, .1m, 100, 1);
-    private readonly NumericUpDown jogFeed = Num(1200, 30, 10000);
+    private readonly NumberSelector step = new("Шаг, мм",["0,05","0,1","0,5","1","5","10","50","100"],"5",100);
+    private readonly NumberSelector jogFeed = new("Скорость, мм/мин",["50","100","500","1000","5000","10000","50000"],"5000",50000);
     private readonly NumericUpDown extrudeLength = Num(5, .1m, 100, 1);
     private readonly NumericUpDown extrudeFeed = Num(180, 1, 1200);
     private readonly ComboBox input = new() { Width = 350 };
@@ -41,10 +43,13 @@ public sealed class HostForm : Form
     private readonly Button cancelButton;
     private readonly Button stopButton;
     private readonly NativePreview preview;
-    private readonly Label nozzleReadout = new(), bedReadout = new(), extrusionReadout = new();
-    private readonly Dictionary<string, Label> endstopLabels = [];
+    private readonly Label extrusionReadout = new();
+    private readonly TemperatureControl nozzleTemperature, bedTemperature;
+    private static readonly string[] EndstopNames = ["x_min","x_max","y_min","y_max","z_min","z_max"];
     private readonly CheckBox nozzleOn = new(), bedOn = new(), fanOn = new();
     private bool syncingHeaters;
+    private readonly CheckBox motors = new() { Text="Motor ON",Checked=true,CheckAlign=ContentAlignment.MiddleRight,TextAlign=ContentAlignment.MiddleLeft };
+    private bool syncingMotors, changingMotors;
     private readonly System.Windows.Forms.Timer timer = new() { Interval = 100 };
     private long nextSlowPoll;
     private int uiDirty;
@@ -53,7 +58,7 @@ public sealed class HostForm : Form
     private PrintController? controller;
     private PrintJob? job;
     private Task? running;
-    private bool connecting, polling, closing, closeReady, hasRun;
+    private bool connecting, polling, closing, closeReady, hasRun, realtimeNotice;
     private bool idleSuppressed;
     private long importGeneration;
     private double lastNozzle, lastBed;
@@ -78,10 +83,14 @@ public sealed class HostForm : Form
         standby.Checked = settings.AutoStandby;
         standby.CheckedChanged += async (_,_) => { settings.AutoStandby=standby.Checked; Save(); if(standby.Checked && controller is { Active:false }) await Guard(Standby); };
         var root = new TableLayoutPanel { Dock=DockStyle.Fill, ColumnCount=2, RowCount=4, Padding=new Padding(10,3,10,3) };
-        root.ColumnStyles.Add(new(SizeType.Absolute,245)); root.ColumnStyles.Add(new(SizeType.Percent,100));
-        root.RowStyles.Add(new(SizeType.Absolute,42)); root.RowStyles.Add(new(SizeType.Percent,100)); root.RowStyles.Add(new(SizeType.Absolute,125)); root.RowStyles.Add(new(SizeType.Absolute,24));
+        root.ColumnStyles.Add(new(SizeType.Absolute,335)); root.ColumnStyles.Add(new(SizeType.Percent,100));
+        root.RowStyles.Add(new(SizeType.Absolute,42)); root.RowStyles.Add(new(SizeType.Percent,100)); root.RowStyles.Add(new(SizeType.Absolute,125)); root.RowStyles.Add(new(SizeType.Absolute,30));
         Controls.Add(root);
-        var top=Row(); top.WrapContents=false; root.Controls.Add(top,0,0); root.SetColumnSpan(top,2);
+        var topBar=new Panel { Dock=DockStyle.Fill,Margin=Padding.Empty }; root.Controls.Add(topBar,0,0); root.SetColumnSpan(topBar,2);
+        var top=Row(); top.WrapContents=false; topBar.Controls.Add(top);
+        var powerOff=Button(topBar,"Питание OFF",async ()=> { idleSuppressed=true; await Manual("M81"); });
+        powerOff.AutoSize=false; powerOff.Width=112; powerOff.Dock=DockStyle.Right; idleButtons.Add(powerOff);
+        tips.SetToolTip(powerOff,"Выключить питание принтера (M81)");
         connectButton=Button(top,"Подключить",ToggleConnection); top.Controls.Add(stateLabel);
         printButton=Button(top,"▶ Печать",StartPrint);
         pauseButton=Button(top,"Пауза",()=> { if(controller?.State==JobState.Paused) controller.Resume(); else controller?.Pause(); return Task.CompletedTask; });
@@ -89,29 +98,39 @@ public sealed class HostForm : Form
         stopButton=Button(top,"Аварийный стоп",Emergency); stopButton.ForeColor=Color.Firebrick;
         top.Controls.Add(fileLabel);
         var side=new FlowLayoutPanel { Dock=DockStyle.Fill, FlowDirection=FlowDirection.TopDown, WrapContents=false, AutoScroll=true, Margin=new Padding(0,0,8,5) }; root.Controls.Add(side,0,1);
-        Panel Group(int height) { var panel=new Panel { Width=230, Height=height, BackColor=Color.Black, BorderStyle=BorderStyle.FixedSingle, Margin=new Padding(0,0,0,7) }; side.Controls.Add(panel); return panel; }
-        var heaters=Group(195);
-        void Heater(int y,string name,NumericUpDown target,Label readout,CheckBox on,decimal max,Func<Task> set,Func<Task> off,bool enabled=true)
+        Panel Group(int height) { var panel=new RoundedPanel { Width=300, Height=height, Margin=new Padding(0,0,0,6) }; side.Controls.Add(panel); return panel; }
+        void IconAt(Control panel,ControlSymbol symbol,int x,int y,int w,int h,string description)
         {
-            var title=new Label { Text=name, Location=new Point(7,y), AutoSize=true }; heaters.Controls.Add(title);
-            readout.Text=enabled ? "— °C" : "не установлен"; readout.AutoSize=true; readout.Location=new Point(110,y); readout.ForeColor=enabled ? Color.WhiteSmoke : Color.Gray; heaters.Controls.Add(readout);
-            target.Location=new Point(133,y+19); target.Width=64; target.ForeColor=Color.Black; target.Enabled=enabled; heaters.Controls.Add(target);
-            var slider=new TrackBar { Location=new Point(3,y+15), Size=new Size(130,29), AutoSize=false, Minimum=0, Maximum=(int)max, Value=(int)target.Value, TickStyle=TickStyle.None, Enabled=enabled }; heaters.Controls.Add(slider);
-            target.ValueChanged+=(_,_)=> { slider.Value=Math.Clamp((int)target.Value,slider.Minimum,slider.Maximum); };
-            slider.ValueChanged+=(_,_)=> target.Value=slider.Value;
-            slider.MouseUp+=async (_,_)=> { if(on.Checked && enabled) await Guard(set); };
-            target.KeyDown+=async (_,e)=> { if(e.KeyCode==Keys.Enter && enabled) { e.SuppressKeyPress=true; await Guard(set); } };
-            on.Location=new Point(204,y+22); on.Size=new Size(18,18); on.Enabled=enabled; heaters.Controls.Add(on);
-            on.CheckedChanged+=async (_,_)=> { if(!syncingHeaters && enabled) await Guard(on.Checked ? set : off); };
-            target.Enabled=enabled;
+            var icon=new ControlIcon(symbol) { Location=new Point(x,y),Size=new Size(w,h),AccessibleName=description };
+            panel.Controls.Add(icon); tips.SetToolTip(icon,description);
         }
-        Heater(5,"Сопло T0",nozzle,nozzleReadout,nozzleOn,300,()=>Live("M104 S"+nozzle.Value),()=>Live("M104 S0"));
-        Heater(52,"Сопло T1",Num(0,0,300),new Label(),new CheckBox(),300,()=>Task.CompletedTask,()=>Task.CompletedTask,false);
-        Heater(99,"Стол",bed,bedReadout,bedOn,130,()=>Live("M140 S"+bed.Value),()=>Live("M140 S0"));
-        var fanReadout=new Label();
-        Heater(146,"Вентилятор",fan,fanReadout,fanOn,100,()=>Live($"M106 P{fanIndex.Value} S{Math.Round(fan.Value*255/100)}"),()=>Live("M107 P"+fanIndex.Value));
-        fan.ValueChanged+=(_,_)=>fanReadout.Text=fan.Value+" %"; fanReadout.Text=fan.Value+" %";
-        var motion=Group(184);
+        TemperatureControl Temperature(string title,NumericUpDown target,CheckBox on,Func<Task> set,Func<Task> off,ControlSymbol symbol)
+        {
+            var block=Group(78);
+            var control=new TemperatureControl(title,target,on) { Location=Point.Empty,Height=78 };
+            block.Controls.Add(control);
+            IconAt(control,symbol,221,30,30,28,title);
+            tips.SetToolTip(on,"Включить / выключить нагрев");
+            tips.SetToolTip(control,"Синий указатель — установка; белый маркер — датчик. Шкала 0–"+target.Maximum+" °C.");
+            control.SetpointCommitted+=async (_,_)=> { if(on.Checked) await Guard(set); };
+            on.CheckedChanged+=async (_,_)=> { if(!syncingHeaters) await Guard(on.Checked ? set : off); };
+            return control;
+        }
+        nozzleTemperature=Temperature("Сопло T0",nozzle,nozzleOn,()=>Live("M104 S"+nozzle.Value),()=>Live("M104 S0"),ControlSymbol.Nozzle);
+        bedTemperature=Temperature("Стол",bed,bedOn,()=>Live("M140 S"+bed.Value),()=>Live("M140 S0"),ControlSymbol.Bed);
+        var fans=Group(50);
+        fans.Controls.Add(new Label { Text="Вентилятор",Location=new Point(9,3),AutoSize=true });
+        var fanReadout=new Label { Location=new Point(121,3),AutoSize=true }; fans.Controls.Add(fanReadout);
+        fan.SetBounds(153,22,62,25); fan.ForeColor=Color.Black; fans.Controls.Add(fan);
+        var fanSlider=new TrackBar { Location=new Point(3,18),Size=new Size(146,29),AutoSize=false,Minimum=0,Maximum=100,TickStyle=TickStyle.None }; fans.Controls.Add(fanSlider);
+        fan.ValueChanged+=(_,_)=> { fanSlider.Value=(int)fan.Value; fanReadout.Text=fan.Value+" %"; }; fanSlider.ValueChanged+=(_,_)=>fan.Value=fanSlider.Value; fanReadout.Text=fan.Value+" %";
+        Task SetFan()=>Live($"M106 P{fanIndex.Value} S{Math.Round(fan.Value*255/100)}");
+        fanSlider.MouseUp+=async (_,_)=> { if(fanOn.Checked) await Guard(SetFan); };
+        fan.KeyDown+=async (_,e)=> { if(e.KeyCode==Keys.Enter) { e.SuppressKeyPress=true; await Guard(SetFan); } };
+        fanOn.SetBounds(224,24,18,18); fans.Controls.Add(fanOn); tips.SetToolTip(fanOn,"Включить / выключить вентилятор");
+        fanOn.CheckedChanged+=async (_,_)=> { if(!syncingHeaters) await Guard(fanOn.Checked ? SetFan : ()=>Live("M107 P"+fanIndex.Value)); };
+        IconAt(fans,ControlSymbol.Fan,253,8,37,37,"Вентилятор обдува");
+        var motion=Group(170);
         Button At(Panel panel,string text,int x,int y,int w,int h,Func<Task> action,bool idle=true)
         {
             var button=Button(panel,text,action); button.AutoSize=false; button.SetBounds(x,y,w,h); if(idle) idleButtons.Add(button); return button;
@@ -123,34 +142,45 @@ public sealed class HostForm : Form
         At(motion,"Y−",57,76,39,30,()=>Require().Jog('Y',-(double)step.Value,(double)jogFeed.Value));
         At(motion,"Z+",177,6,39,30,()=>Require().Jog('Z',(double)step.Value,(double)jogFeed.Value));
         At(motion,"Z−",177,76,39,30,()=>Require().Jog('Z',-(double)step.Value,(double)jogFeed.Value));
-        motion.Controls.Add(new Label { Text="Шаг, мм",AutoSize=true,Location=new Point(7,109) });
-        motion.Controls.Add(new Label { Text="Скор., мм/мин",AutoSize=true,Location=new Point(108,109) });
-        step.SetBounds(8,126,77,25); jogFeed.SetBounds(112,126,100,25); step.ForeColor=jogFeed.ForeColor=Color.Black; motion.Controls.AddRange([step,jogFeed]);
-        string[] stops=["x_min","x_max","y_min","y_max","z_min","z_max"];
-        for(int i=0;i<stops.Length;i++) { var label=new Label { Text=new[]{"X−","X+","Y−","Y+","Z−","Z+"}[i],TextAlign=ContentAlignment.MiddleCenter,Location=new Point(7+i*36,155),Size=new Size(31,18),BackColor=Color.FromArgb(50,50,50) }; endstopLabels[stops[i]]=label; motion.Controls.Add(label); }
-        var ext=Group(120);
+        motion.Controls.Add(new Label { Text="Шаг, мм",AutoSize=true,Location=new Point(7,121) });
+        motion.Controls.Add(new Label { Text="Скор., мм/мин",AutoSize=true,Location=new Point(108,121) });
+        step.SetBounds(8,139,77,25); jogFeed.SetBounds(112,139,100,25); step.ForeColor=jogFeed.ForeColor=Color.Black; motion.Controls.AddRange([step,jogFeed]);
+        IconAt(motion,ControlSymbol.Motion,242,17,43,43,"Перемещение по осям X, Y, Z");
+        motors.SetBounds(216,140,81,24); motors.Font=new Font("Segoe UI",8); motion.Controls.Add(motors);
+        tips.SetToolTip(motors,"Включить драйверы моторов (M17) / отключить (M84)");
+        motors.CheckedChanged+=async (_,_)=> { motors.Text=motors.Checked ? "Motor ON" : "Motor OFF"; if(!syncingMotors) await Guard(ToggleMotors); };
+        var ext=Group(90);
         At(ext,"−",9,8,33,28,()=>Require().Extrude(-(double)extrudeLength.Value,(double)extrudeFeed.Value));
         At(ext,"+",176,8,33,28,()=>Require().Extrude((double)extrudeLength.Value,(double)extrudeFeed.Value));
         extrusionReadout.Text="T0 · — мм"; extrusionReadout.AutoSize=true; extrusionReadout.Location=new Point(50,14); ext.Controls.Add(extrusionReadout);
-        var future=new Label { Text="T1 · второй экструдер не установлен",AutoSize=true,ForeColor=Color.Gray,Location=new Point(10,45) }; ext.Controls.Add(future);
-        ext.Controls.Add(new Label { Text="Длина, мм",AutoSize=true,Location=new Point(7,70) }); ext.Controls.Add(new Label { Text="Скор., мм/мин",AutoSize=true,Location=new Point(108,70) });
-        extrudeLength.SetBounds(8,88,77,25); extrudeFeed.SetBounds(112,88,100,25); extrudeLength.ForeColor=extrudeFeed.ForeColor=Color.Black; ext.Controls.AddRange([extrudeLength,extrudeFeed]);
-        var rates=Group(74);
+        ext.Controls.Add(new Label { Text="Длина, мм",AutoSize=true,Location=new Point(7,43) }); ext.Controls.Add(new Label { Text="Скор., мм/мин",AutoSize=true,Location=new Point(108,43) });
+        extrudeLength.SetBounds(8,61,77,25); extrudeFeed.SetBounds(112,61,100,25); extrudeLength.ForeColor=extrudeFeed.ForeColor=Color.Black; ext.Controls.AddRange([extrudeLength,extrudeFeed]);
+        IconAt(ext,ControlSymbol.Extrusion,240,6,44,76,"Подача и откат филамента");
+        var rates=Group(68);
         rates.Controls.Add(new Label { Text="Скорость %",AutoSize=true,Location=new Point(7,9) }); speed.SetBounds(95,6,65,25); rates.Controls.Add(speed);
         var sb=At(rates,"✓",177,5,34,27,()=>Live("M220 S"+speed.Value),false); connectedButtons.Add(sb);
-        rates.Controls.Add(new Label { Text="Подача %",AutoSize=true,Location=new Point(7,43) }); flow.SetBounds(95,40,65,25); rates.Controls.Add(flow);
-        var fb=At(rates,"✓",177,39,34,27,()=>Live("M221 S"+flow.Value),false); connectedButtons.Add(fb); speed.ForeColor=flow.ForeColor=Color.Black;
+        rates.Controls.Add(new Label { Text="Подача %",AutoSize=true,Location=new Point(7,37) }); flow.SetBounds(95,34,65,25); rates.Controls.Add(flow);
+        var fb=At(rates,"✓",177,33,34,27,()=>Live("M221 S"+flow.Value),false); connectedButtons.Add(fb); speed.ForeColor=flow.ForeColor=Color.Black;
+        IconAt(rates,ControlSymbol.Speed,238,8,48,48,"Масштаб скорости и подачи");
+        var home=Group(46);
+        IconAt(home,ControlSymbol.Home,8,8,30,30,"Возврат в исходную позицию");
+        foreach(var pair in new[]{("X",47),("Y",96),("Z",145),("XYZ",194)})
+        {
+            string axes=pair.Item1; var homeButton=At(home,axes,pair.Item2,9,axes=="XYZ" ? 59 : 40,28,()=>Manual(axes=="XYZ" ? "G28" : "G28 "+axes));
+            tips.SetToolTip(homeButton,axes=="XYZ" ? "Домой по всем осям" : "Домой по оси "+axes);
+        }
         preview=new NativePreview(); root.Controls.Add(preview,1,1);
         var lower=new Panel { Dock=DockStyle.Fill, Margin=new Padding(0,0,8,0) }; root.Controls.Add(lower,0,2);
-        lower.Controls.Add(new Label { Text="Домой",AutoSize=true,Location=new Point(5,0) });
-        foreach(var pair in new[]{('X',5),('Y',47),('Z',89)}) At(lower,pair.Item1.ToString(),pair.Item2,20,35,30,()=>Manual("G28 "+pair.Item1));
-        At(lower,"Все",133,20,40,30,()=>Manual("G28"));
-        At(lower,"OFF",178,20,53,30,async ()=> { idleSuppressed=true; await Manual("M81"); });
-        input.SetBounds(4,65,167,28); input.ForeColor=Color.Black; lower.Controls.Add(input);
-        var send=At(lower,"Send",176,63,55,29,SendInput); input.KeyDown+=async (_,e)=> { if(e.KeyCode==Keys.Enter) { e.SuppressKeyPress=true; await Guard(SendInput); } };
+        terminal.Location=new Point(4,18); terminal.Checked=terminalEnabled=settings.Terminal; lower.Controls.Add(terminal);
+        tips.SetToolTip(terminal,"Показывать команды и ответы принтера в журнале. Фоновый опрос статуса скрыт.");
+        terminal.CheckedChanged+=(_,_)=> { terminalEnabled=terminal.Checked; settings.Terminal=terminal.Checked; Save(); };
+        input.SetBounds(4,65,218,28); input.ForeColor=Color.Black; lower.Controls.Add(input);
+        var send=At(lower,"Send",230,63,65,29,SendInput); input.KeyDown+=async (_,e)=> { if(e.KeyCode==Keys.Enter) { e.SuppressKeyPress=true; await Guard(SendInput); } };
         progressLabel.SetBounds(4,100,230,22); lower.Controls.Add(progressLabel);
         journal.BackColor=Color.FromArgb(17,30,22); journal.ForeColor=Color.FromArgb(125,235,145); journal.BorderStyle=BorderStyle.FixedSingle; root.Controls.Add(journal,1,2);
-        progress.Height=9; progress.Dock=DockStyle.Fill; root.Controls.Add(progress,1,3);
+        var footer=new Panel { Dock=DockStyle.Fill,Margin=new Padding(0) }; root.Controls.Add(footer,1,3);
+        var progressHolder=new Panel { Dock=DockStyle.Fill,Padding=new Padding(0,11,0,11) }; footer.Controls.Add(progressHolder); progressHolder.BringToFront();
+        progress.Dock=DockStyle.Fill; progressHolder.Controls.Add(progress);
         var menu=new MenuStrip { BackColor=Color.WhiteSmoke,ForeColor=Color.Black }; MainMenuStrip=menu; Controls.Add(menu);
         ToolStripMenuItem Menu(string text) { var item=new ToolStripMenuItem(text); menu.Items.Add(item); return item; }
         void Item(ToolStripMenuItem parent,string text,Func<Task> action) { parent.DropDownItems.Add(text,null,async (_,_)=>await Guard(action)); }
@@ -169,10 +199,10 @@ public sealed class HostForm : Form
         var commands=Menu("Команды"); Item(commands,"Нагрев ожидания",Standby); Item(commands,"Весь нагрев выключить",AllHeatOff); Item(commands,"Питание включить M80",()=>Manual("M80")); Item(commands,"Питание выключить M81",async ()=> { idleSuppressed=true; await Manual("M81"); });
         Item(commands,"Скорость и подача 100%",()=>Live("M220 S100\nM221 S100")); Item(commands,"Отключить двигатели",()=>Manual("M84")); Item(commands,"Очистить журнал",()=> { journal.Clear(); return Task.CompletedTask; });
         var scriptsMenu=Menu("Скрипты"); scriptsMenu.DropDownOpening+=(_,_)=> { scriptsMenu.DropDownItems.Clear(); for(int i=0;i<3;i++) { int n=i; Item(scriptsMenu,settings.ScriptNames[n],()=>Manual(settings.Scripts[n])); } };
-        var help=Menu("Справка"); Item(help,"Управление",()=> { MessageBox.Show(this,"ЛКМ — вращение камеры; ПКМ — сдвиг; колесо — масштаб.\nПодключение настраивается через меню «Настройки».\nT1 зарезервирован для будущей головки.\nПауза ждёт текущую команду, затем поднимает Z на 15 мм и паркует X/Y.","Marlin Host"); return Task.CompletedTask; });
+        var help=Menu("Справка"); Item(help,"Управление",()=> { MessageBox.Show(this,"ЛКМ — вращение камеры; ПКМ — сдвиг; колесо — масштаб.\nПодключение настраивается через меню «Настройки».\nПауза ждёт текущую команду, затем поднимает Z на 15 мм и паркует X/Y.","Marlin Host"); return Task.CompletedTask; });
         Item(help,"О программе",()=> { MessageBox.Show(this,"Marlin Host 0.2\nПросмотрщик Marlin Simulator / MarlinSimUI.","О программе"); return Task.CompletedTask; });
         details.CheckedChanged+=(_,_)=>verbose=details.Checked;
-        timer.Tick+=async (_,_)=> { if(Interlocked.Exchange(ref uiDirty,0)!=0) UpdateUi(); await Poll(); }; timer.Start(); FormClosing+=ClosingForm;
+        timer.Tick+=async (_,_)=> { if(Interlocked.Exchange(ref uiDirty,0)!=0) UpdateUi(); if(controller is not null && link?.Connected==true) preview.Head=controller.Motion.Position; await Poll(); }; timer.Start(); FormClosing+=ClosingForm;
         Log("Marlin Host 0.2. Настройки подключения — в меню. Для симулятора: TCP 127.0.0.1:7000."); UpdateUi();
     }
 
@@ -233,6 +263,12 @@ public sealed class HostForm : Form
         pauseButton.Enabled = connected && controller?.State is JobState.Printing or JobState.Paused;
         pauseButton.Text = controller?.State == JobState.Paused ? "Продолжить" : "Пауза";
         cancelButton.Enabled = connected && active && controller?.State != JobState.Cancelling;
+        motors.Enabled=connected && !active && !changingMotors;
+        if(!changingMotors)
+        {
+            syncingMotors=true; motors.Checked=controller?.MotorsEnabled ?? true; syncingMotors=false;
+        }
+        if(!connected) preview.EndstopMask=0;
         stopButton.Enabled = connected; nozzleOn.Enabled=bedOn.Enabled=fanOn.Enabled=connected;
         input.Enabled = connected && !active;
         stateLabel.Text = !connected ? "Нет связи" : "Подключён · " + StateName(controller?.State ?? JobState.Idle);
@@ -264,15 +300,23 @@ public sealed class HostForm : Form
                     line.Contains("_min:") || line.Contains("_max:"))
                     Ui(() => { if (ReferenceEquals(link, next)) Receive(line); });
             };
+            next.TerminalTraffic += (line,incoming) =>
+            {
+                if(!terminalEnabled || verbose) return;
+                // Faults are already reported unconditionally by Receive.
+                if(incoming && (line.StartsWith("Error:") || line.StartsWith("!!") || line.Contains("Unknown command") || line.Contains("cold extrusion"))) return;
+                Ui(()=> { if(ReferenceEquals(link,next)) Log((incoming ? "← " : "→ ")+line); });
+            };
             next.Sent += line => { if(verbose) Ui(() => Log("→ " + line)); };
             next.Lost += reason => Ui(() => { idleSuppressed = true; Log("Связь остановлена: " + reason); UpdateUi(); });
             if (transport.Text == "TCP") await next.ConnectTcp(address.Text.Trim(), (int)port.Value);
             else await next.ConnectSerial(com.Text.Trim(), (int)baud.Value);
-            controller = new PrintController(next);
+            controller = new PrintController(next); realtimeNotice=false;
             controller.Message += text => Ui(() => Log(text)); controller.Changed += () => Interlocked.Exchange(ref uiDirty,1);
             await controller.Initialize();
             if (controller.MaxX is > 0 && controller.MaxY is > 0) { preview.BedX = controller.MaxX.Value; preview.BedY = controller.MaxY.Value; }
             idleSuppressed = false; Save(); Log("Подключено. Marlin готов.");
+            Log(controller.Motion.Limits.HasSteps && controller.Motion.Limits.HasAcceleration ? "Параметры движения прочитаны из Marlin (M503)." : "Marlin не выдал все параметры движения; расчёт превью использует резервные ограничения.");
             if (settings.AutoStandby) await Standby();
         }
         catch { if (link is not null) await link.DisposeAsync(); link = null; controller = null; throw; }
@@ -282,7 +326,7 @@ public sealed class HostForm : Form
     {
         if (controller?.Active == true) throw new InvalidOperationException("Сначала отмените задание или используйте аварийный стоп.");
         if (link is not null) await link.DisposeAsync();
-        link = null; controller = null; Log("Отключено."); UpdateUi();
+        link = null; controller = null; nozzleTemperature.SetActual(null); bedTemperature.SetActual(null); preview.EndstopMask=0; Log("Отключено."); UpdateUi();
     }
     private void Receive(string line)
     {
@@ -290,15 +334,22 @@ public sealed class HostForm : Form
         var b = Regex.Match(line, @"(?:^|\s)B:\s*([-\d.]+)\s*/\s*([-\d.]+)");
         if (t.Success) { lastNozzle = double.Parse(t.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture); temperatures.Text = $"Сопло {lastNozzle:0.0} / {t.Groups[2].Value} °C\n" + (b.Success ? $"Стол {b.Groups[1].Value} / {b.Groups[2].Value} °C" : $"Стол {lastBed:0.0} °C"); }
         syncingHeaters=true;
-        if(t.Success) { nozzleReadout.Text=t.Groups[1].Value+" / "+t.Groups[2].Value+" °C"; nozzleOn.Checked=double.Parse(t.Groups[2].Value,System.Globalization.CultureInfo.InvariantCulture)>0; }
-        if(b.Success) { bedReadout.Text=b.Groups[1].Value+" / "+b.Groups[2].Value+" °C"; bedOn.Checked=double.Parse(b.Groups[2].Value,System.Globalization.CultureInfo.InvariantCulture)>0; }
+        if(t.Success) { nozzleTemperature.SetReportedTemperature(lastNozzle,double.Parse(t.Groups[2].Value,System.Globalization.CultureInfo.InvariantCulture)); nozzleOn.Checked=double.Parse(t.Groups[2].Value,System.Globalization.CultureInfo.InvariantCulture)>0; }
+        if(b.Success) { bedTemperature.SetReportedTemperature(double.Parse(b.Groups[1].Value,System.Globalization.CultureInfo.InvariantCulture),double.Parse(b.Groups[2].Value,System.Globalization.CultureInfo.InvariantCulture)); bedOn.Checked=double.Parse(b.Groups[2].Value,System.Globalization.CultureInfo.InvariantCulture)>0; }
         syncingHeaters=false;
         var limit=Regex.Match(line,@"^(x_min|x_max|y_min|y_max|z_min|z_max):\s*(\w+)",RegexOptions.IgnoreCase);
-        if(limit.Success && endstopLabels.TryGetValue(limit.Groups[1].Value.ToLowerInvariant(),out var led)) led.BackColor=limit.Groups[2].Value.Equals("TRIGGERED",StringComparison.OrdinalIgnoreCase) ? Color.Firebrick : Color.DarkGreen;
+        if(limit.Success)
+        {
+            int index=Array.IndexOf(EndstopNames,limit.Groups[1].Value.ToLowerInvariant());
+            if(index>=0)
+            {
+                int bit=1<<index;
+                preview.EndstopMask=limit.Groups[2].Value.Equals("TRIGGERED",StringComparison.OrdinalIgnoreCase)
+                    ? preview.EndstopMask|bit : preview.EndstopMask&~bit;
+            }
+        }
         var extruded=Regex.Match(line,@"^X:.*?E:\s*([-\d.]+)"); if(extruded.Success) extrusionReadout.Text="T0 · "+extruded.Groups[1].Value+" мм";
         if (b.Success) lastBed = double.Parse(b.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
-        var p = Regex.Match(line, @"^X:\s*([-\d.]+)\s*Y:\s*([-\d.]+)\s*Z:\s*([-\d.]+)");
-        if (p.Success) { preview.Head = new Vector3(float.Parse(p.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture), float.Parse(p.Groups[2].Value, System.Globalization.CultureInfo.InvariantCulture), float.Parse(p.Groups[3].Value, System.Globalization.CultureInfo.InvariantCulture)); preview.Invalidate(); }
         if (details.Checked || line.StartsWith("Error:") || line.Contains("Unknown command") || line.Contains("cold extrusion") || line.StartsWith("!!")) Log("← " + line);
     }
     private async Task Poll()
@@ -308,14 +359,22 @@ public sealed class HostForm : Form
         try
         {
             bool slow=Environment.TickCount64>=nextSlowPoll;
-            await controller.Manual(slow ? "M105\nM114\nM119" : "M114", true);
+            await controller.Manual(slow ? "M105\nM114 R\nM119" : "M114 R", true, background:true);
+            if(controller.Motion.RealtimeObserved && !realtimeNotice) { realtimeNotice=true; Log("Превью: синхронизация по реальным координатам принтера."); }
             if(slow) nextSlowPoll=Environment.TickCount64+2000;
         }
         catch (Exception ex) { if (link?.Connected == true) Log(ex.Message); }
         finally { polling = false; UpdateUi(); }
     }
-    private async Task Live(string command) { Log("Команда: " + command); await Require().Manual(command, true); }
-    private async Task Manual(string command) { Log("Ручная команда: " + command.Replace('\n', ' ')); await Require().Manual(command); }
+    private async Task ToggleMotors()
+    {
+        bool enabled=motors.Checked;
+        changingMotors=true; UpdateUi();
+        try { await Manual(enabled ? "M17" : "M84"); }
+        finally { changingMotors=false; UpdateUi(); }
+    }
+    private async Task Live(string command) { if(!terminalEnabled && !verbose) Log("Команда: " + command); await Require().Manual(command, true); }
+    private async Task Manual(string command) { if(!terminalEnabled && !verbose) Log("Ручная команда: " + command.Replace('\n', ' ')); await Require().Manual(command); }
     private async Task SendInput()
     {
         string command = input.Text.Trim(); if (command.Length == 0) return;

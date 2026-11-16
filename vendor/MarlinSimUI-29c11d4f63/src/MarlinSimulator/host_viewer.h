@@ -77,13 +77,21 @@ inline int run_host_viewer(uintptr_t parent_value) {
   unsigned frame_count=0, head_count=0, smooth_frames=0;
   auto fps_time=head_time;
   bool open_settings=false;
+  int endstop_mask=0;
   UserInterface::getElement<Viewport>("Viewport")->menu_callback = [&](UiWindow* w) {
     vis.ui_viewport_menu_callback(w);
+    if(endstop_mask) {
+      const char* names[]={"X-","X+","Y-","Y+","Z-","Z+"};
+      std::string active;
+      for(int i=0;i<6;++i) if(endstop_mask&(1<<i)) { if(!active.empty()) active+=" "; active+=names[i]; }
+      ImGui::GetForegroundDrawList()->AddText(ImGui::GetFont(),24.f,ImVec2(50.f,32.f),IM_COL32(255,218,90,255),active.c_str());
+    }
     if(open_settings) { ImGui::OpenPopup("Extrusion Settings"); open_settings=false; }
   };
   auto command = [&](const std::string& line) {
     std::istringstream stream(line); std::string op; stream >> op;
     if (op == "QUIT") app.active = false;
+    else if (op == "ENDSTOPS") { int mask=0; if(stream >> mask) endstop_mask=mask&63; }
     else if (op == "SETTINGS") open_settings=true;
     else if (op == "VISIBLE") { int value=1; stream >> value; extrusion_visible=value!=0; for(auto& ex:vis.extrusion) ex.is_visible=extrusion_visible; }
     else if (op == "PROGRESS") {
@@ -128,7 +136,7 @@ inline int run_host_viewer(uintptr_t parent_value) {
         head_time=now; head_received=true; ++head_count;
       }
     }
-    else if (op == "STATS") printf("VIEWER_STATS fps=%.1f heads=%u interpolated=%u printed=%zu segments=%zu cursor=%d relative=%d\n",measured_fps,head_count,smooth_frames,printed_cursor,scene.size(),SDL_ShowCursor(SDL_QUERY),SDL_GetRelativeMouseMode());
+    else if (op == "STATS") printf("VIEWER_STATS fps=%.1f heads=%u interpolated=%u printed=%zu segments=%zu cursor=%d relative=%d endstops=%d\n",measured_fps,head_count,smooth_frames,printed_cursor,scene.size(),SDL_ShowCursor(SDL_QUERY),SDL_GetRelativeMouseMode(),endstop_mask);
     else if (op == "RESET") {
       vis.camera.position = {37,121,129}; vis.camera.look_at({build_plate_dimension.x*.5f,0,-build_plate_dimension.y*.5f});
     }
