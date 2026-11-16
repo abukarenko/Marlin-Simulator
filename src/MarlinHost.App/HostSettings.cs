@@ -5,6 +5,7 @@ namespace MarlinHost;
 public sealed class HostSettings
 {
     public string Transport { get; set; } = "TCP";
+    public string AnimationProfile { get; set; } = "Авто (COM: CoreXY, TCP: симулятор)";
     public string Address { get; set; } = "127.0.0.1";
     public int Port { get; set; } = 7000;
     public string Com { get; set; } = "";
@@ -12,6 +13,7 @@ public sealed class HostSettings
     public int FanIndex { get; set; }
     public string Slicer { get; set; } = "";
     public bool AutoStandby { get; set; }
+    public bool AdditionalLeveling { get; set; }
     public int StandbyNozzle { get; set; } = 100;
     public int StandbyBed { get; set; } = 50;
     public double Yaw { get; set; } = -0.8;

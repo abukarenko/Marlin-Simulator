@@ -3,6 +3,7 @@
 **/obj/
 **/.pio/
 *.zip
+!firmware/ramps-four-point/Marlin-2.1.2.8-four-point-source.zip
 msys-packages.html
 data/
 dist/

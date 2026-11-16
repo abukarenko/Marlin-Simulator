@@ -1,4 +1,4 @@
-param([switch]$HostOnly)
+param([switch]$HostOnly, [string]$OutputDirectory = "dist/host")
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 Push-Location $root
@@ -15,15 +15,15 @@ try {
             if ($LASTEXITCODE -ne 0) { Get-Content artifacts/host-native-build.log -Tail 60; throw 'Native viewer build failed' }
         } finally { $env:PATH=$oldPath; $env:PLATFORMIO_CORE_DIR=$oldCore }
     }
-    & dotnet publish src/MarlinHost.App -c Release --no-self-contained -o dist/host -p:NuGetAudit=false
+    & dotnet publish src/MarlinHost.App -c Release --no-self-contained -o $OutputDirectory -p:NuGetAudit=false
     if ($LASTEXITCODE -ne 0) { throw 'Marlin Host build failed' }
     $viewer = Join-Path $root 'vendor\Marlin-2.1.2.9\.pio\build\simulator_windows\debug\MarlinSimulator.exe'
     if (-not (Test-Path -LiteralPath $viewer)) { throw 'Build native simulator/viewer first: scripts/Build.ps1' }
-    New-Item -ItemType Directory -Force dist/host/viewer | Out-Null
-    Copy-Item -LiteralPath $viewer -Destination dist/host/viewer/MarlinViewer.exe
-    Copy-Item .tools/mingw64/bin/*.dll dist/host/viewer/
-    Copy-Item -LiteralPath LICENSE -Destination dist/host/viewer/LICENSE.txt
-    New-Item -ItemType Directory -Force dist/host/viewer/licenses | Out-Null
-    Copy-Item .tools/mingw64/share/licenses/* dist/host/viewer/licenses/ -Recurse -Force
-    Write-Host 'Ready: dist\host\MarlinHost.App.exe'
+    New-Item -ItemType Directory -Force "$OutputDirectory/viewer" | Out-Null
+    Copy-Item -LiteralPath $viewer -Destination "$OutputDirectory/viewer/MarlinViewer.exe"
+    Copy-Item .tools/mingw64/bin/*.dll "$OutputDirectory/viewer/"
+    Copy-Item -LiteralPath LICENSE -Destination "$OutputDirectory/viewer/LICENSE.txt"
+    New-Item -ItemType Directory -Force "$OutputDirectory/viewer/licenses" | Out-Null
+    Copy-Item .tools/mingw64/share/licenses/* "$OutputDirectory/viewer/licenses/" -Recurse -Force
+    Write-Host "Ready: $OutputDirectory/MarlinHost.App.exe"
 } finally { Pop-Location }

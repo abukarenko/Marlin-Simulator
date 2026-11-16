@@ -69,14 +69,30 @@ public sealed record PathSegment(Vector3 From, Vector3 To, bool Extruding, int C
 public sealed record PrintJob(string FileName, string[] Commands, List<PathSegment> Segments, bool HasArcs)
 {
     public Color FilamentColor { get; init; } = Color.FromArgb(255,128,0);
+    public int[] LayerEndCommands { get; init; } = [];
+    public bool EstimatedLayers { get; init; }
+    public ProbeRectangle? ModelFootprint { get; init; }
+    public int FirstExtrusionCommand { get; init; } = -1;
+    public int PrintedLayers(int confirmedCommands)
+    {
+        int index = Array.BinarySearch(LayerEndCommands, confirmedCommands - 1);
+        return index >= 0 ? index + 1 : ~index;
+    }
     public static PrintJob Load(string path)
     {
         if (new FileInfo(path).Length > 150_000_000) throw new IOException("Для первой версии размер задания ограничен 150 МБ.");
         Color filament=Color.FromArgb(255,128,0);
         var commands=new List<string>();
+        var modelCommands=new HashSet<int>(); string currentType="";
+        var layerStarts = new List<int>();
         var outlineCommands=new HashSet<int>(); bool outer=false;
         foreach(string raw in File.ReadLines(path))
         {
+            string comment = raw.Trim();
+            if(comment.StartsWith(";TYPE:",StringComparison.OrdinalIgnoreCase)) currentType=comment[6..].Trim();
+            if (comment.Equals(";LAYER_CHANGE", StringComparison.OrdinalIgnoreCase) ||
+                Regex.IsMatch(comment, @"^;LAYER:\s*\d+\s*$", RegexOptions.IgnoreCase))
+                if (layerStarts.Count == 0 || layerStarts[^1] != commands.Count) layerStarts.Add(commands.Count);
             if(raw.StartsWith(";TYPE:",StringComparison.OrdinalIgnoreCase))
                 outer=raw.Contains("External perimeter",StringComparison.OrdinalIgnoreCase) || raw.Contains("WALL-OUTER",StringComparison.OrdinalIgnoreCase) || raw.Contains("Outer wall",StringComparison.OrdinalIgnoreCase);
             if(raw.StartsWith("; filament_colour",StringComparison.OrdinalIgnoreCase))
@@ -84,14 +100,21 @@ public sealed record PrintJob(string FileName, string[] Commands, List<PathSegme
                 var color=Regex.Match(raw,@"#[0-9a-fA-F]{6}");
                 if(color.Success) filament=ColorTranslator.FromHtml(color.Value);
             }
-            string clean=GCode.Clean(raw); if(clean.Length>0) { if(outer) outlineCommands.Add(commands.Count); commands.Add(clean); }
+            string clean=GCode.Clean(raw); if(clean.Length>0) {
+                if(outer) outlineCommands.Add(commands.Count);
+                if(!currentType.Equals("Custom",StringComparison.OrdinalIgnoreCase) &&
+                   !currentType.Contains("Skirt",StringComparison.OrdinalIgnoreCase) &&
+                   !currentType.Contains("Brim",StringComparison.OrdinalIgnoreCase) &&
+                   !currentType.Contains("Wipe tower",StringComparison.OrdinalIgnoreCase)) modelCommands.Add(commands.Count);
+                commands.Add(clean);
+            }
         }
         var lines=commands.ToArray();
         if (lines.Length == 0) throw new IOException("В файле нет команд.");
         if (lines.Any(l => l.StartsWith('N') || l.Contains('*') || l.Any(c => c > 127) || l.IndexOf('\0') >= 0))
             throw new IOException("Нужен обычный текстовый G-code без номеров строк и контрольных сумм.");
         if (lines.Any(l => Regex.IsMatch(l, @"^T[1-9]"))) throw new IOException("В версии 0.1 доступен только экструдер T0.");
-        var state = new ModalState(); var segments = new List<PathSegment>(); bool arcs = false; int plane = 17;
+        var state = new ModalState(); var segments = new List<PathSegment>(); bool arcs = false; int plane = 17, firstExtrusion=-1;
         for (int i = 0; i < lines.Length; i++)
         {
             string op = GCode.Op(lines[i]);
@@ -99,6 +122,7 @@ public sealed record PrintJob(string FileName, string[] Commands, List<PathSegme
             var from = state.Position; double e = state.E; double unit = state.Inches ? 25.4 : 1; state.Apply(lines[i]);
             if (GCode.Op(lines[i]) is "G0" or "G00" or "G1" or "G01" or "G2" or "G3")
             {
+                if(state.E>e && firstExtrusion<0) firstExtrusion=i;
                 if (op is "G2" or "G3")
                 {
                     var points = Arc(from, state.Position, lines[i], plane, unit);
@@ -108,10 +132,38 @@ public sealed record PrintJob(string FileName, string[] Commands, List<PathSegme
                 else if (from != state.Position) segments.Add(new(from, state.Position, state.E > e, i,outlineCommands.Count==0 || outlineCommands.Contains(i)));
             }
         }
-        return new(path, lines, segments, arcs) { FilamentColor=filament };
+        var layerEnds = new List<int>();
+        bool estimated = layerStarts.Count == 0;
+        if (!estimated)
+        {
+            int layer = 0, last = -1;
+            foreach (var segment in segments)
+            {
+                while (layer + 1 < layerStarts.Count && segment.Command >= layerStarts[layer + 1])
+                { if (last >= 0) layerEnds.Add(last); last = -1; layer++; }
+                if (segment.Command >= layerStarts[layer] && segment.Extruding) last = segment.Command;
+            }
+            if (last >= 0) layerEnds.Add(last);
+        }
+        else
+        {
+            float height = float.NegativeInfinity;
+            foreach (var segment in segments.Where(s => s.Extruding))
+            {
+                if (layerEnds.Count == 0 || segment.To.Z > height + .001f)
+                { layerEnds.Add(segment.Command); height = segment.To.Z; }
+                else layerEnds[^1] = segment.Command;
+            }
+        }
+        var deposited=segments.Where(s=>s.Extruding && modelCommands.Contains(s.Command)).ToArray();
+        ProbeRectangle? footprint=deposited.Length==0 ? null : new(
+            deposited.Min(s=>Math.Min(s.From.X,s.To.X)),deposited.Max(s=>Math.Max(s.From.X,s.To.X)),
+            deposited.Min(s=>Math.Min(s.From.Y,s.To.Y)),deposited.Max(s=>Math.Max(s.From.Y,s.To.Y)));
+        return new(path, lines, segments, arcs) { FilamentColor=filament, LayerEndCommands=layerEnds.ToArray(), EstimatedLayers=estimated,
+            ModelFootprint=footprint, FirstExtrusionCommand=firstExtrusion };
     }
 
-    private static List<Vector3> Arc(Vector3 start, Vector3 end, string command, int plane, double unit)
+    internal static List<Vector3> Arc(Vector3 start, Vector3 end, string command, int plane, double unit)
     {
         Vector3 Project(Vector3 p) => plane switch { 18 => new(p.Z, p.X, p.Y), 19 => new(p.Y, p.Z, p.X), _ => p };
         Vector3 Unproject(Vector3 p) => plane switch { 18 => new(p.Y, p.Z, p.X), 19 => new(p.Z, p.X, p.Y), _ => p };

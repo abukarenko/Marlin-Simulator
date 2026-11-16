@@ -11,6 +11,7 @@ public sealed class PrintController
     private readonly SemaphoreSlim operation = new(1);
     private volatile bool pauseRequested;
     private volatile bool cancelRequested;
+    private volatile bool emergencyRequested;
     private TaskCompletionSource wake = NewSignal();
     private ModalState modal = new();
     public JobState State { get; private set; }
@@ -33,10 +34,14 @@ public sealed class PrintController
     public PrintController(PrinterLink link)
     {
         this.link = link;
+        link.Received += line => {
+            var point=Regex.Match(line,@"^FOUR_POINT_PROBING ([1-4])\b");
+            if(point.Success) Message?.Invoke("Выравнивание: замер точки "+point.Groups[1].Value+" из 4.");
+        };
         link.Lost += _ => { cancelRequested = true; wake.TrySetResult(); if (Active) SetState(JobState.Faulted); };
     }
 
-    private void SetState(JobState state) { State = state; Changed?.Invoke(); }
+    private void SetState(JobState state) { State = emergencyRequested ? JobState.Faulted : state; Changed?.Invoke(); }
     private async Task<string[]> Send(string command, bool track = true)
     {
         var replies = await link.Send(command);
@@ -59,6 +64,7 @@ public sealed class PrintController
         try
         {
             await ReadBounds();
+            await Send("M503 S0");
             await Send("M105");
             await Send("M114");
             await Send("M119");
@@ -204,10 +210,51 @@ public sealed class PrintController
         finally { operation.Release(); }
     }
 
-    public async Task Run(PrintJob job)
+    private async Task LevelModel(PrintJob job)
+    {
+        if(!modal.Homed) throw new IOException("Для дополнительного выравнивания нужен G28 всех осей до первой экструзии.");
+        if(MaxZ is null) throw new IOException("Неизвестна максимальная высота Z. Выравнивание отменено.");
+        var limits=FourPointLeveling.ReadLimits(await Send("G29 K0",false));
+        var area=FourPointLeveling.Plan(job,limits);
+        if(cancelRequested) return;
+        Message?.Invoke("Дополнительное выравнивание: 4 точки, "+area+". Изменения только в RAM.");
+        if(BedTarget>0) await Send("M190 R"+GCode.N(BedTarget),false);
+        if(cancelRequested) return;
+        await Send("M400",false);
+        var saved=modal.Copy();
+        var (at,e)=ParsePosition(await Send("M114",false));
+        if(at.Z<0 || at.Z>MaxZ-10) throw new IOException("Недостаточно места по Z для безопасного возврата после замера.");
+        await Send("G21",false); await Send("G90",false);
+        if(cancelRequested) { foreach(string c in saved.RestoreModes()) await Send(c,false); return; }
+        var reply=await Send("G29 K4 "+area.Arguments+" V1",false);
+        if(!reply.Any(l=>l.Trim()=="FOUR_POINT_OK")) {
+            foreach(string c in saved.RestoreModes()) await Send(c,false);
+            modal.Apply("M410");
+            throw new IOException("Прошивка не подтвердила успешный четырёхточечный замер. Печать не начата.");
+        }
+        if(cancelRequested) { foreach(string c in saved.RestoreModes()) await Send(c,false); return; }
+        await Send("M420 S1",false);
+        // Probe travel changes XYZ. Return above the saved position, then descend and restore modes/feed.
+        double height=Math.Max(10,at.Z+10);
+        await Send("G1 Z"+GCode.N(height)+" F600",false);
+        await Send($"G1 X{GCode.N(at.X)} Y{GCode.N(at.Y)} F3000",false);
+        await Send("G1 Z"+GCode.N(at.Z)+" F600",false);
+        foreach(string c in saved.RestoreModes()) await Send(c,false);
+        await Send("M400",false); modal=saved;
+        Message?.Invoke("Четырёхточечное выравнивание применено. Продолжаем файл.");
+    }
+
+    public async Task Run(PrintJob job, bool additionalLeveling=false)
     {
         if (Active) throw new InvalidOperationException("Задание уже выполняется.");
-        pauseRequested = cancelRequested = Parked = false; Progress = 0;
+        if(additionalLeveling && !link.SupportsFourPointLeveling) throw new IOException("Нужна прошивка с поддержкой FOUR_POINT_LEVELING. Обычный G29 вместо четырёх точек не запускается.");
+        if(additionalLeveling && (job.ModelFootprint is null || job.FirstExtrusionCommand<0)) throw new IOException("Не удалось определить область модели для выравнивания.");
+        if(additionalLeveling) {
+            var startup=modal.Copy();
+            foreach(string command in job.Commands.Take(job.FirstExtrusionCommand)) startup.Apply(command);
+            if(!startup.Homed) throw new IOException("Нужен поиск нуля всех осей G28 до первой экструзии. Файл не запущен.");
+        }
+        emergencyRequested = false; pauseRequested = cancelRequested = Parked = false; Progress = 0;
         SetState(JobState.Printing);
         try
         {
@@ -220,7 +267,10 @@ public sealed class PrintController
                 else
                 {
                     await operation.WaitAsync();
-                    try { if (!cancelRequested) await Send(job.Commands[i]); }
+                    try {
+                        if(additionalLeveling && i==job.FirstExtrusionCommand && !cancelRequested) await LevelModel(job);
+                        if (!cancelRequested) await Send(job.Commands[i]);
+                    }
                     finally { operation.Release(); }
                 }
                 Progress = i + 1; Changed?.Invoke();
@@ -245,6 +295,7 @@ public sealed class PrintController
 
     public async Task Emergency()
     {
+        emergencyRequested = true;
         cancelRequested = true; wake.TrySetResult();
         await link.Raw("M112");
         SetState(JobState.Faulted);

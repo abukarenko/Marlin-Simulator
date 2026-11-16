@@ -4,7 +4,9 @@
 
 [Скачать готовую сборку для Windows](https://github.com/abukarenko/Marlin-Simulator/releases/latest)
 
-**Marlin Host 0.2** — отдельное приложение управления принтером: запуск `Start-Host.cmd`, [инструкция и возможности](HOST.md).
+**Marlin Host 0.4** — отдельное приложение управления принтером: запуск `Start-Host.cmd`, [инструкция и возможности](HOST.md).
+
+Прошивка RAMPS/Mega2560 с четырёхточечным выравниванием: [HEX, исходники и инструкция](firmware/ramps-four-point/README.md).
 
 Эмулятор 3D-принтера для Windows с **настоящей прошивкой Marlin 2.1.2.9**.
 Прошивка собирается в штатном окружении `simulator_windows` и работает с виртуальными

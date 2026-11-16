@@ -19,6 +19,8 @@ public sealed class HostForm : Form
     private readonly RichTextBox journal = new() { Dock = DockStyle.Fill, ReadOnly = true, BackColor = Color.FromArgb(246, 248, 250), Font = new Font("Consolas", 9) };
     private readonly CheckBox details = new() { Text = "Подробный обмен", AutoSize = true };
     private readonly CheckBox standby = new() { Text = "Поддерживать температуру при простое", AutoSize = true };
+    private readonly CheckBox additionalLeveling = new() { Text="Доп. выравнивание · 4 точки",AutoSize=true };
+    private readonly Label levelingArea = new() { AutoSize=true,Text="Загрузите модель",Font=new Font("Segoe UI",8) };
     private readonly NumericUpDown nozzle = Num(230, 0, 300);
     private readonly NumericUpDown bed = Num(85, 0, 130);
     private readonly NumericUpDown fan = Num(0, 0, 100);
@@ -32,6 +34,7 @@ public sealed class HostForm : Form
     private readonly ComboBox input = new() { Width = 350 };
     private readonly ProgressBar progress = new() { Dock = DockStyle.Bottom, Height = 20 };
     private readonly Label progressLabel = new() { AutoSize = true };
+    private readonly Label layersLabel = new() { AutoSize = true, Text = "Слои: — / —" };
     private readonly List<Button> idleButtons = [];
     private readonly List<Button> connectedButtons = [];
     private readonly ToolTip tips = new();
@@ -47,6 +50,8 @@ public sealed class HostForm : Form
     private bool syncingHeaters;
     private readonly System.Windows.Forms.Timer timer = new() { Interval = 100 };
     private long nextSlowPoll;
+    private MotionPreview? motion;
+    private readonly System.Windows.Forms.Timer animationTimer = new() { Interval = 33 };
     private int uiDirty;
     private volatile bool verbose;
     private PrinterLink? link;
@@ -63,7 +68,7 @@ public sealed class HostForm : Form
 
     public HostForm()
     {
-        Text = "Marlin Host · 0.2"; Size = new Size(1280, 900); MinimumSize = new Size(1060, 740);
+        Text = "Marlin Host · 0.4"; Size = new Size(1280, 900); MinimumSize = new Size(1060, 740);
         Font = new Font("Segoe UI", 9); StartPosition = FormStartPosition.CenterScreen;
         BackColor = Color.FromArgb(76,76,76); ForeColor = Color.WhiteSmoke;
         Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
@@ -78,7 +83,7 @@ public sealed class HostForm : Form
         standby.Checked = settings.AutoStandby;
         standby.CheckedChanged += async (_,_) => { settings.AutoStandby=standby.Checked; Save(); if(standby.Checked && controller is { Active:false }) await Guard(Standby); };
         var root = new TableLayoutPanel { Dock=DockStyle.Fill, ColumnCount=2, RowCount=4, Padding=new Padding(10,3,10,3) };
-        root.ColumnStyles.Add(new(SizeType.Absolute,245)); root.ColumnStyles.Add(new(SizeType.Percent,100));
+        root.ColumnStyles.Add(new(SizeType.Absolute,265)); root.ColumnStyles.Add(new(SizeType.Percent,100));
         root.RowStyles.Add(new(SizeType.Absolute,42)); root.RowStyles.Add(new(SizeType.Percent,100)); root.RowStyles.Add(new(SizeType.Absolute,125)); root.RowStyles.Add(new(SizeType.Absolute,24));
         Controls.Add(root);
         var top=Row(); top.WrapContents=false; root.Controls.Add(top,0,0); root.SetColumnSpan(top,2);
@@ -90,6 +95,10 @@ public sealed class HostForm : Form
         top.Controls.Add(fileLabel);
         var side=new FlowLayoutPanel { Dock=DockStyle.Fill, FlowDirection=FlowDirection.TopDown, WrapContents=false, AutoScroll=true, Margin=new Padding(0,0,8,5) }; root.Controls.Add(side,0,1);
         Panel Group(int height) { var panel=new Panel { Width=230, Height=height, BackColor=Color.Black, BorderStyle=BorderStyle.FixedSingle, Margin=new Padding(0,0,0,7) }; side.Controls.Add(panel); return panel; }
+        var leveling=Group(52); additionalLeveling.Location=new Point(5,4); additionalLeveling.Checked=settings.AdditionalLeveling; leveling.Controls.Add(additionalLeveling);
+        levelingArea.Location=new Point(7,29); leveling.Controls.Add(levelingArea);
+        additionalLeveling.CheckedChanged+=(_,_)=> { settings.AdditionalLeveling=additionalLeveling.Checked; Save(); };
+        tips.SetToolTip(additionalLeveling,"Перед первой экструзией: нагрев стола, 4 угла области модели с запасом 2 мм. Нужна специальная прошивка. EEPROM не перезаписывается.");
         var heaters=Group(195);
         void Heater(int y,string name,NumericUpDown target,Label readout,CheckBox on,decimal max,Func<Task> set,Func<Task> off,bool enabled=true)
         {
@@ -149,6 +158,8 @@ public sealed class HostForm : Form
         input.SetBounds(4,65,167,28); input.ForeColor=Color.Black; lower.Controls.Add(input);
         var send=At(lower,"Send",176,63,55,29,SendInput); input.KeyDown+=async (_,e)=> { if(e.KeyCode==Keys.Enter) { e.SuppressKeyPress=true; await Guard(SendInput); } };
         progressLabel.SetBounds(4,100,230,22); lower.Controls.Add(progressLabel);
+        layersLabel.SetBounds(4,0,235,22); root.Controls.Add(layersLabel,0,3);
+        tips.SetToolTip(layersLabel,"Напечатано / всего. По подтверждению последнего движения с экструзией слоя; движения могут ещё быть в планировщике. ≈ — оценка по высоте экструзии без меток слоёв.");
         journal.BackColor=Color.FromArgb(17,30,22); journal.ForeColor=Color.FromArgb(125,235,145); journal.BorderStyle=BorderStyle.FixedSingle; root.Controls.Add(journal,1,2);
         progress.Height=9; progress.Dock=DockStyle.Fill; root.Controls.Add(progress,1,3);
         var menu=new MenuStrip { BackColor=Color.WhiteSmoke,ForeColor=Color.Black }; MainMenuStrip=menu; Controls.Add(menu);
@@ -162,6 +173,7 @@ public sealed class HostForm : Form
         var idle=new ToolStripMenuItem("Температура ожидания автоматически") { Checked=standby.Checked,CheckOnClick=true }; idle.CheckedChanged+=(_,_)=>standby.Checked=idle.Checked; setup.DropDownItems.Add(idle);
         var diagnostic=new ToolStripMenuItem("Подробный журнал") { CheckOnClick=true }; diagnostic.CheckedChanged+=(_,_)=>details.Checked=diagnostic.Checked; setup.DropDownItems.Add(diagnostic);
         var view=Menu("Вид"); Item(view,"Сброс камеры",()=> { preview.Reset(); return Task.CompletedTask; });
+        Item(view,"Перезапустить 3D-просмотрщик",()=> { preview.Restart(); return Task.CompletedTask; });
         foreach(string name in new[]{"Сверху","Спереди","Справа"}) Item(view,name,()=> { preview.View(name); return Task.CompletedTask; });
         Item(view,"Очистить изображение",()=> { preview.ClearImage(); return Task.CompletedTask; }); Item(view,"Вернуть модель",()=> { preview.RestoreImage(); return Task.CompletedTask; });
         var show=new ToolStripMenuItem("Показывать экструзию") { Checked=true,CheckOnClick=true }; show.CheckedChanged+=(_,_)=>preview.Send(show.Checked ? "VISIBLE 1" : "VISIBLE 0"); view.DropDownItems.Add(show);
@@ -170,10 +182,13 @@ public sealed class HostForm : Form
         Item(commands,"Скорость и подача 100%",()=>Live("M220 S100\nM221 S100")); Item(commands,"Отключить двигатели",()=>Manual("M84")); Item(commands,"Очистить журнал",()=> { journal.Clear(); return Task.CompletedTask; });
         var scriptsMenu=Menu("Скрипты"); scriptsMenu.DropDownOpening+=(_,_)=> { scriptsMenu.DropDownItems.Clear(); for(int i=0;i<3;i++) { int n=i; Item(scriptsMenu,settings.ScriptNames[n],()=>Manual(settings.Scripts[n])); } };
         var help=Menu("Справка"); Item(help,"Управление",()=> { MessageBox.Show(this,"ЛКМ — вращение камеры; ПКМ — сдвиг; колесо — масштаб.\nПодключение настраивается через меню «Настройки».\nT1 зарезервирован для будущей головки.\nПауза ждёт текущую команду, затем поднимает Z на 15 мм и паркует X/Y.","Marlin Host"); return Task.CompletedTask; });
-        Item(help,"О программе",()=> { MessageBox.Show(this,"Marlin Host 0.2\nПросмотрщик Marlin Simulator / MarlinSimUI.","О программе"); return Task.CompletedTask; });
+        Item(help,"О программе",()=> { MessageBox.Show(this,"Marlin Host 0.4\nПросмотрщик Marlin Simulator / MarlinSimUI.","О программе"); return Task.CompletedTask; });
         details.CheckedChanged+=(_,_)=>verbose=details.Checked;
         timer.Tick+=async (_,_)=> { if(Interlocked.Exchange(ref uiDirty,0)!=0) UpdateUi(); await Poll(); }; timer.Start(); FormClosing+=ClosingForm;
-        Log("Marlin Host 0.2. Настройки подключения — в меню. Для симулятора: TCP 127.0.0.1:7000."); UpdateUi();
+        Log("Marlin Host 0.4. Настройки подключения — в меню. Для симулятора: TCP 127.0.0.1:7000."); UpdateUi();
+        animationTimer.Tick += (_,_) => { if(this.motion is not null) preview.Head=this.motion.Sample(); };
+        animationTimer.Start();
+        FormClosed += (_,_) => animationTimer.Dispose();
     }
 
     private Task ScriptsDialog()
@@ -224,6 +239,8 @@ public sealed class HostForm : Form
     private void UpdateUi()
     {
         bool connected = link?.Connected == true, active = controller?.Active == true;
+        additionalLeveling.Enabled=job is not null && !active && !connecting;
+        levelingArea.Text=job?.ModelFootprint is {} bounds ? bounds.ToString() : "Загрузите модель";
         com.Visible = baud.Visible = transport.Text == "COM"; address.Visible = port.Visible = transport.Text == "TCP";
         transport.Enabled = address.Enabled = port.Enabled = com.Enabled = baud.Enabled = !connected && !connecting;
         connectButton.Text = connected ? "Отключить" : "Подключить"; connectButton.Enabled = !connecting && !active;
@@ -244,6 +261,7 @@ public sealed class HostForm : Form
             int sent = hasRun ? Math.Min(controller?.Progress ?? 0, job.Commands.Length) : 0;
             progress.Value = job.Commands.Length > 0 ? (int)(sent * 100L / job.Commands.Length) : 0;
             progressLabel.Text = $"{sent:N0} / {job.Commands.Length:N0} команд";
+            layersLabel.Text = job.LayerEndCommands.Length == 0 ? "Слои: — / —" : $"Слои: {(job.EstimatedLayers ? "≈ " : "")}{job.PrintedLayers(sent):N0} / {job.LayerEndCommands.Length:N0}";
             preview.Progress = sent; preview.Invalidate();
         }
     }
@@ -257,6 +275,11 @@ public sealed class HostForm : Form
         {
             if (link is not null) await link.DisposeAsync();
             var next = new PrinterLink(); link = next;
+            bool ramps=settings.AnimationProfile=="CoreXY Marlin 2.1.2.8" || (settings.AnimationProfile.StartsWith("Авто") && transport.Text=="COM");
+            motion=new MotionPreview(ramps ? MotionProfile.Ramps() : new MotionProfile());
+            Log("Расчётная анимация: "+motion.Profile.Name+". M114 корректирует конечную точку очереди.");
+            next.CommandStarted += command => Ui(() => { if(ReferenceEquals(link,next)) motion?.Started(command); });
+            next.CommandCompleted += (command,replies) => Ui(() => { if(ReferenceEquals(link,next)) motion?.Completed(command,replies); });
             next.Received += line =>
             {
                 if(verbose || line.StartsWith("X:") || line.Contains("T:") || line.Contains("T0:") || line.Contains("B:") ||
@@ -265,7 +288,7 @@ public sealed class HostForm : Form
                     Ui(() => { if (ReferenceEquals(link, next)) Receive(line); });
             };
             next.Sent += line => { if(verbose) Ui(() => Log("→ " + line)); };
-            next.Lost += reason => Ui(() => { idleSuppressed = true; Log("Связь остановлена: " + reason); UpdateUi(); });
+            next.Lost += reason => Ui(() => { motion?.Stop(); idleSuppressed = true; Log("Связь остановлена: " + reason); UpdateUi(); });
             if (transport.Text == "TCP") await next.ConnectTcp(address.Text.Trim(), (int)port.Value);
             else await next.ConnectSerial(com.Text.Trim(), (int)baud.Value);
             controller = new PrintController(next);
@@ -282,7 +305,7 @@ public sealed class HostForm : Form
     {
         if (controller?.Active == true) throw new InvalidOperationException("Сначала отмените задание или используйте аварийный стоп.");
         if (link is not null) await link.DisposeAsync();
-        link = null; controller = null; Log("Отключено."); UpdateUi();
+        motion?.Stop(); motion=null; link = null; controller = null; Log("Отключено."); UpdateUi();
     }
     private void Receive(string line)
     {
@@ -298,7 +321,7 @@ public sealed class HostForm : Form
         var extruded=Regex.Match(line,@"^X:.*?E:\s*([-\d.]+)"); if(extruded.Success) extrusionReadout.Text="T0 · "+extruded.Groups[1].Value+" мм";
         if (b.Success) lastBed = double.Parse(b.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
         var p = Regex.Match(line, @"^X:\s*([-\d.]+)\s*Y:\s*([-\d.]+)\s*Z:\s*([-\d.]+)");
-        if (p.Success) { preview.Head = new Vector3(float.Parse(p.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture), float.Parse(p.Groups[2].Value, System.Globalization.CultureInfo.InvariantCulture), float.Parse(p.Groups[3].Value, System.Globalization.CultureInfo.InvariantCulture)); preview.Invalidate(); }
+        if (p.Success && motion is null) { preview.Head = new Vector3(float.Parse(p.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture), float.Parse(p.Groups[2].Value, System.Globalization.CultureInfo.InvariantCulture), float.Parse(p.Groups[3].Value, System.Globalization.CultureInfo.InvariantCulture)); preview.Invalidate(); }
         if (details.Checked || line.StartsWith("Error:") || line.Contains("Unknown command") || line.Contains("cold extrusion") || line.StartsWith("!!")) Log("← " + line);
     }
     private async Task Poll()
@@ -307,9 +330,11 @@ public sealed class HostForm : Form
         polling = true;
         try
         {
-            bool slow=Environment.TickCount64>=nextSlowPoll;
-            await controller.Manual(slow ? "M105\nM114\nM119" : "M114", true);
-            if(slow) nextSlowPoll=Environment.TickCount64+2000;
+            if(Environment.TickCount64<nextSlowPoll) return;
+            // M119 switches BLTouch SW mode and can block firmware for ~1.25 seconds.
+            // During a job keep the last endstop report; do not interrupt motion with this query.
+            await controller.Manual(controller.Active ? "M105\nM114" : "M105\nM114\nM119", true);
+            nextSlowPoll=Environment.TickCount64+2000;
         }
         catch (Exception ex) { if (link?.Connected == true) Log(ex.Message); }
         finally { polling = false; UpdateUi(); }
@@ -331,6 +356,7 @@ public sealed class HostForm : Form
     private async Task AllHeatOff() { idleSuppressed = true; await Live("M104 S0\nM140 S0"); }
     private async Task Emergency()
     {
+        motion?.Stop();
         idleSuppressed = true; Log("АВАРИЙНЫЙ СТОП M112. Перед продолжением перезапустите принтер.");
         await Require().Emergency(); UpdateUi();
     }
@@ -359,8 +385,10 @@ public sealed class HostForm : Form
     {
         if (job is null) return;
         var current = Require(); if (current.Active) return;
+        bool doLevel=additionalLeveling.Checked;
         idleSuppressed = false; hasRun = true; preview.Progress=0; preview.RestoreImage(); Log("Печать: " + job.FileName);
-        running = current.Run(job); UpdateUi();
+        // Serial throughput must not depend on repainting, OpenGL IPC or the UI message queue.
+        running = Task.Run(() => current.Run(job,doLevel)); UpdateUi();
         try
         {
             await running; Log("Задание: " + StateName(current.State));
@@ -391,6 +419,10 @@ public sealed class HostForm : Form
         void ShowTransport() { host.Visible=tcp.Visible=mode.Text=="TCP"; serial.Visible=rate.Visible=mode.Text=="COM"; }
         mode.SelectedIndexChanged+=(_,_)=>ShowTransport(); ShowTransport();
         panel.Controls.Add(Label("Для изменения связи сначала отключите принтер. COM: 8N1, без flow control."));
+        panel.Controls.Add(Label("Профиль расчётной анимации (не меняет прошивку)"));
+        var animation=new ComboBox { Width=480,DropDownStyle=ComboBoxStyle.DropDownList,Enabled=link?.Connected!=true };
+        animation.Items.AddRange(["Авто (COM: CoreXY, TCP: симулятор)","CoreXY Marlin 2.1.2.8","Marlin Simulator"]);
+        animation.SelectedItem=settings.AnimationProfile; if(animation.SelectedIndex<0) animation.SelectedIndex=0; panel.Controls.Add(animation);
         panel.Controls.Add(Label("Путь к PrusaSlicer"));
         var slicer = new TextBox { Width = 720, Text = settings.Slicer }; panel.Controls.Add(slicer);
         Button(panel, "Выбрать программу…", () => { using var file = new OpenFileDialog { Filter = "Программа|*.exe" }; if (file.ShowDialog(dialog) == DialogResult.OK) slicer.Text = file.FileName; return Task.CompletedTask; });
@@ -401,7 +433,7 @@ public sealed class HostForm : Form
         var integration = new TextBox { Width = 720, ReadOnly = true, Text = $"\"{Application.ExecutablePath}\" --from-slicer" }; panel.Controls.Add(integration);
         Button(panel, "Скопировать строку", () => { Clipboard.SetText(integration.Text); return Task.CompletedTask; });
         panel.Controls.Add(new Label { Text = "После успешного экспорта файл загрузится автоматически. Печать сама не запускается.\nПри активном задании новый файл откладывается до его завершения.\nВторая головка будет добавлена в следующей версии.", AutoSize = true });
-        Button(panel, "Сохранить", () => { transport.SelectedItem=mode.Text; address.Text=host.Text; port.Value=tcp.Value; com.Text=serial.Text; baud.Value=rate.Value; fanIndex.Value=fanNumber.Value; settings.Slicer = slicer.Text.Trim(); settings.StandbyNozzle = (int)sn.Value; settings.StandbyBed = (int)sb.Value; Save(); dialog.Close(); return Task.CompletedTask; });
+        Button(panel, "Сохранить", () => { settings.AnimationProfile=animation.Text; transport.SelectedItem=mode.Text; address.Text=host.Text; port.Value=tcp.Value; com.Text=serial.Text; baud.Value=rate.Value; fanIndex.Value=fanNumber.Value; settings.Slicer = slicer.Text.Trim(); settings.StandbyNozzle = (int)sn.Value; settings.StandbyBed = (int)sb.Value; Save(); dialog.Close(); return Task.CompletedTask; });
         dialog.ShowDialog(this); return Task.CompletedTask;
     }
 

@@ -1,0 +1,2 @@
+7d8b7de638c1c563fde01479888455422e65a1d6b5860da01944f600d1fffacd  Marlin-2.1.2.8-mega2560-four-point.hex
+7fd1c1c4917ea81abfc511017cde89a4fbf6054caf1cd5e91389124867a3014f  Marlin-2.1.2.8-four-point-source.zip

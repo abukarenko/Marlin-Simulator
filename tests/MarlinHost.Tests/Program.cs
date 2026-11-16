@@ -13,10 +13,77 @@ static async Task Until(Func<bool> condition, int seconds = 10)
     while (!condition()) { if (DateTime.UtcNow > deadline) throw new TimeoutException("State timeout"); await Task.Delay(10); }
 }
 
+if (args.Contains("--four-point"))
+{
+    string fixture=Path.GetFullPath("artifacts/four-point-test.gcode"); Directory.CreateDirectory(Path.GetDirectoryName(fixture)!);
+    File.WriteAllText(fixture,"G28\nG21\nG90\nM83\nM140 S50\nG1 X20 Y30 Z2\nG1 E2 F120\n;TYPE:Skirt/Brim\nG1 X10 Y10 E1\nG1 X90 Y90\n;TYPE:External perimeter\nG1 X110 Y90 E1\nG1 X110 Y110 E1\nG1 X90 Y110 E1\nG1 X90 Y90 E1\nM104 S0\n");
+    var job4=PrintJob.Load(fixture);
+    Check(job4.ModelFootprint==new ProbeRectangle(90,110,90,110),"Skirt included in model footprint");
+    var area4=FourPointLeveling.Plan(job4,new(10,200,20,200));
+    Check(area4==new ProbeRectangle(88,112,88,112),"Model probing margin wrong");
+    foreach(string scenario in new[]{"success","unsupported","failed","out-of-bounds","no-home","cancel"})
+    {
+        var listener4=new TcpListener(IPAddress.Loopback,0); listener4.Start();
+        var trace4=new System.Collections.Concurrent.ConcurrentQueue<string>();
+        var probeStarted4=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var timeout4=new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var serve4=Task.Run(async ()=>
+        {
+            using var client4=await listener4.AcceptTcpClientAsync(timeout4.Token);
+            using var reader4=new StreamReader(client4.GetStream());
+            using var writer4=new StreamWriter(client4.GetStream()){AutoFlush=true};
+            while(await reader4.ReadLineAsync(timeout4.Token) is {} wire4)
+            {
+                string command4=Regex.Replace(wire4,@"^N\d+ (.*)\*\d+$","$1"); trace4.Enqueue(command4);
+                if(command4=="M115" && scenario!="unsupported") await writer4.WriteLineAsync("Cap:FOUR_POINT_LEVELING:1");
+                if(command4=="M211") await writer4.WriteLineAsync("Min: X0 Y0 Z0 Max: X210 Y210 Z160");
+                if(command4=="M114") await writer4.WriteLineAsync("X:20 Y:30 Z:2 E:0");
+                if(command4=="G29 K0") await writer4.WriteLineAsync(scenario=="out-of-bounds" ? "FOUR_POINT_CAPS V1 L10 R80 F20 B200" : "FOUR_POINT_CAPS V1 L10 R200 F20 B200");
+                if(command4.StartsWith("G29 K4"))
+                {
+                    probeStarted4.TrySetResult();
+                    if(scenario=="cancel") await Task.Delay(200,timeout4.Token);
+                    for(int corner4=1;corner4<=4;corner4++) await writer4.WriteLineAsync($"FOUR_POINT_POINT {corner4} Z0.01");
+                    await writer4.WriteLineAsync(scenario=="failed" ? "FOUR_POINT_FAILED" : "FOUR_POINT_OK");
+                }
+                await writer4.WriteLineAsync("ok");
+            }
+        });
+        await using(var link4=new PrinterLink())
+        {
+            await link4.ConnectTcp("127.0.0.1",((IPEndPoint)listener4.LocalEndpoint).Port);
+            var controller4=new PrintController(link4); await controller4.Initialize();
+            var runJob4=scenario=="no-home" ? job4 with { Commands=job4.Commands[1..], FirstExtrusionCommand=job4.FirstExtrusionCommand-1 } : job4;
+            var task4=controller4.Run(runJob4,true);
+            if(scenario=="cancel") { await probeStarted4.Task.WaitAsync(TimeSpan.FromSeconds(5)); controller4.Cancel(); }
+            bool failed4=false; try { await task4; } catch(IOException) { failed4=true; }
+            var sent4=trace4.ToArray();
+            if(scenario=="success")
+            {
+                int probe4=Array.FindIndex(sent4,c=>c.StartsWith("G29 K4"));
+                int extrude4=Array.IndexOf(sent4,"G1 E2 F120");
+                Check(!failed4 && controller4.State==JobState.Completed && probe4>=0 && extrude4>probe4,"Probe not completed before first extrusion");
+                Check(sent4[probe4]=="G29 K4 L88 R112 F88 B112 V1","Wrong probe rectangle command");
+                Check(sent4.Skip(probe4).Take(extrude4-probe4).Contains("G1 X20 Y30 F3000") && sent4.Skip(probe4).Take(extrude4-probe4).Contains("M83"),"Return position or relative E mode not restored");
+            }
+            else Check(!sent4.Contains("G1 E2 F120"),"Extrusion started despite probe failure/cancel");
+            if(scenario is "unsupported" or "out-of-bounds" or "no-home") Check(!sent4.Any(c=>c.StartsWith("G29 K4")),"Unsafe/unsupported probe dispatched");
+            if(scenario=="unsupported") Check(!sent4.Contains("G29 K0"),"Old firmware received dangerous capability query");
+            if(scenario=="cancel") Check(!failed4 && controller4.State==JobState.Cancelled && sent4.Contains("M104 S0"),"Probe cancellation did not stop job/heaters");
+            if(scenario is "failed" or "out-of-bounds" or "unsupported" or "no-home") Check(failed4,"Invalid four-point setup accepted");
+            Check(!sent4.Any(c=>c is "M500" or "M501"),"Probing wrote/reloaded EEPROM");
+        }
+        await serve4; listener4.Stop();
+        Console.WriteLine("PASS four-point: "+scenario);
+    }
+    return;
+}
+
 if (args.Contains("--ui"))
 {
     var uiListener = new TcpListener(IPAddress.Loopback, 0); uiListener.Start();
     int uiPort = ((IPEndPoint)uiListener.LocalEndpoint).Port;
+    var uiCommands=new System.Collections.Concurrent.ConcurrentQueue<string>();
     var serving = Task.Run(async () =>
     {
         using var client = await uiListener.AcceptTcpClientAsync();
@@ -24,6 +91,8 @@ if (args.Contains("--ui"))
         using var writer = new StreamWriter(client.GetStream()) { AutoFlush = true };
         while (await reader.ReadLineAsync() is { } command)
         {
+            uiCommands.Enqueue(command);
+            if(Regex.IsMatch(command,@"\bG1\b")) await Task.Delay(5);
             if (command.Contains("M211")) await writer.WriteLineAsync("  Min: X0 Y0 Z0  Max: X220 Y220 Z250");
             if (command.Contains("M105")) await writer.WriteLineAsync("T:205.0 /230.0 B:85.0 /85.0");
             if (command.Contains("M114")) await writer.WriteLineAsync("X:20.00 Y:30.00 Z:2.00 E:5.00");
@@ -53,6 +122,9 @@ if (args.Contains("--ui"))
                     await Task.Delay(300);
                     Check(((ComboBox)Field("transport")).Text == "TCP", "Transport selector lost value");
                     Check(((Button)Field("printButton")).Enabled, "Print button disabled after load and connection");
+                    Check(((CheckBox)Field("additionalLeveling")).Enabled && ((Label)Field("levelingArea")).Text!="Загрузите модель","Four-point option/footprint absent after import");
+                    var sidebar=form.Controls.OfType<TableLayoutPanel>().Single().Controls.OfType<FlowLayoutPanel>().Single(p=>p.AutoScroll);
+                    Check(!sidebar.HorizontalScroll.Visible,"Sidebar controls clipped by horizontal scrolling");
                     Check(((Label)Field("temperatures")).Text.Contains("205"), "Temperature telemetry absent");
                     string path = Path.GetFullPath("artifacts/host-ui-qa/connected.png"); Directory.CreateDirectory(Path.GetDirectoryName(path)!);
                     await (Task)typeof(HostForm).GetMethod("SaveSnapshot",BindingFlags.NonPublic|BindingFlags.Instance)!.Invoke(form,[path])!;
@@ -62,13 +134,16 @@ if (args.Contains("--ui"))
                     await Task.Delay(2200); // Exclude scene import and synchronous screenshot from the FPS window.
                     ((System.Windows.Forms.Timer)Field("timer")).Stop();
                     await Task.Delay(250); // Drain the last telemetry reply before the synthetic head sample.
-                    view.GetType().GetProperty("Head")!.SetValue(view,new System.Numerics.Vector3(80,70,10));
-                    await Task.Delay(200);
+                    var animation=(MotionPreview)Field("motion");
+                    animation.Started("G1 X80 Y70 Z10 F600");
+                    await Task.Delay(400);
+                    var animatedHead=(System.Numerics.Vector3)view.GetType().GetProperty("Head")!.GetValue(view)!;
+                    Check(animatedHead.X>20 && animatedHead.X<80 && animatedHead.Z>2 && animatedHead.Z<10,"Command-driven head did not move between telemetry replies");
                     view.GetType().GetMethod("Send")!.Invoke(view,["STATS"]);
                     string stats="";
                     for(int i=0;i<30;i++) { stats=(string)view.GetType().GetProperty("RendererStats")!.GetValue(view)!; if(stats.Length>0) break; await Task.Delay(50); }
                     var measured=Regex.Match(stats,@"fps=([\d.]+) heads=(\d+) interpolated=(\d+)");
-                    Check(measured.Success && double.Parse(measured.Groups[1].Value,System.Globalization.CultureInfo.InvariantCulture)>0 && int.Parse(measured.Groups[2].Value)>5 && int.Parse(measured.Groups[3].Value)>0,"Renderer/polling/interpolation statistics missing: "+stats);
+                    Check(measured.Success && double.Parse(measured.Groups[1].Value,System.Globalization.CultureInfo.InvariantCulture)>0 && int.Parse(measured.Groups[2].Value)>5 && Regex.IsMatch(stats,@"predicted=[1-9]\d*"),"Renderer/prediction statistics missing: "+stats);
                     Check(double.Parse(measured.Groups[1].Value,System.Globalization.CultureInfo.InvariantCulture)<=32,"Viewer exceeded 30 FPS budget");
                     Check(stats.Contains("cursor=1 relative=0"),"Cursor hidden or relative mouse mode enabled: "+stats);
                     Console.WriteLine(stats);
@@ -97,6 +172,32 @@ if (args.Contains("--ui"))
                     view.GetType().GetProperty("Progress")!.SetValue(view,0);
                     await WaitVisual(n=>n==0);
                     Console.WriteLine("PASS viewer: ghost before print, partial/full coloring, reset, visible cursor and 30 FPS cap.");
+                    if (!args.Contains("--transport"))
+                    {
+                    int imports=(int)view.GetType().GetProperty("SceneCount")!.GetValue(view)!;
+                    var child=(Process)view.GetType().GetField("process",BindingFlags.NonPublic|BindingFlags.Instance)!.GetValue(view)!;
+                    child.Kill();
+                    for(int i=0;i<200 && (int)view.GetType().GetProperty("SceneCount")!.GetValue(view)!<=imports;i++) await Task.Delay(50);
+                    Check((int)view.GetType().GetProperty("SceneCount")!.GetValue(view)!>imports,"Viewer did not recover and reload scene after termination");
+                    Console.WriteLine("PASS viewer recovery: terminated child restarted and scene restored.");
+                    }
+                    string streamFile=Path.GetFullPath("artifacts/host-ui-qa/stream.gcode");
+                    File.WriteAllLines(streamFile,new[]{"G90","M83"}.Concat(Enumerable.Range(0,200).Select(i=>$"G1 X{i%20} Y30 E0.1 F600")));
+                    await form.Import(streamFile);
+                    int endstopReports=uiCommands.Count(c=>c.Contains("M119"));
+                    int temperatureReports=uiCommands.Count(c=>c.Contains("M105"));
+                    var printStarted=Call("StartPrint");
+                    // Deliberately block repainting: acknowledgements and file transmission must continue.
+                    Thread.Sleep(500);
+                    Check(((PrintController)Field("controller")).Progress>0,"Printer transmission stalled with the UI thread");
+                    Check(((PrintController)Field("controller")).Active,"Test print ended before active telemetry check");
+                    typeof(HostForm).GetField("nextSlowPoll",BindingFlags.NonPublic|BindingFlags.Instance)!.SetValue(form,0L);
+                    await Call("Poll");
+                    Check(uiCommands.Count(c=>c.Contains("M119"))==endstopReports && uiCommands.Count(c=>c.Contains("M105"))>temperatureReports,"Active telemetry queried BLTouch endstops or skipped temperatures");
+                    await printStarted;
+                    Check(((PrintController)Field("controller")).State==JobState.Completed,"Background print did not finish");
+                    Console.WriteLine("PASS transport: file commands continue while the UI thread is blocked for 500 ms.");
+                    Console.WriteLine("PASS active telemetry: temperature queried, M119 excluded during printing.");
                     await Call("Disconnect");
                     Check(!((Button)Field("printButton")).Enabled, "Print allowed after disconnect");
                     Console.WriteLine("PASS UI: connection, file import, print availability, temperature telemetry, disconnect and layout snapshot.");
@@ -253,7 +354,7 @@ await using (var link = new PrinterLink())
     Check(fresh.State == JobState.Completed, "Unhomed pause cannot resume");
     running = fresh.Run(job); fresh.Pause(); await Until(() => fresh.State == JobState.Paused);
     await fresh.Emergency();
-    try { await running; throw new Exception("Emergency job completed normally"); } catch (Exception ex) when (ex is IOException or OperationCanceledException or ObjectDisposedException) { }
+    try { await running; } catch (Exception ex) when (ex is IOException or OperationCanceledException or ObjectDisposedException) { }
     Check(!link.Connected && fresh.State == JobState.Faulted, "Emergency did not stop session");
     Console.WriteLine("PASS: checksums/resend, busy handling, pause/restore modes, live controls, blocked manual motion, cancellation while paused.");
     Console.WriteLine("PASS: max-Z clamp, pause before homing, emergency while paused, repeated connection disposal.");
@@ -278,3 +379,56 @@ Check(colored.FilamentColor.R==0x33 && colored.FilamentColor.G==0x66 && colored.
 Check(!colored.Segments[0].Outline && colored.Segments[1].Outline,"Internal infill obscures planned exterior outline");
 Check(arcJob.Segments.All(s=>s.Outline),"G-code without path type metadata lost its preview");
 Console.WriteLine("PASS: filament RGB, transparent exterior outline metadata, fallback for plain G-code.");
+
+string layerFile = Path.GetFullPath("artifacts/host-layer-test.gcode");
+foreach (string marker in new[] { ";LAYER_CHANGE", ";LAYER:0" })
+{
+    File.WriteAllText(layerFile, $"G90\nM83\nG1 X1 E1\n{marker}\nG1 Z0.2\nG1 X10 E1\nG1 Z0.8\nG1 Z0.2\nG1 X20 E1\n{(marker == ";LAYER_CHANGE" ? marker : ";LAYER:1")}\nG1 Z0.4\nG1 X10 E1\nM104 S0\n");
+    var layered = PrintJob.Load(layerFile);
+    Check(!layered.EstimatedLayers && layered.LayerEndCommands.Length == 2,"Layer markers not recognized or purge/Z-hop counted as layers");
+    int end = layered.LayerEndCommands[0];
+    Check(layered.PrintedLayers(0)==0 && layered.PrintedLayers(end)==0 && layered.PrintedLayers(end+1)==1 && layered.PrintedLayers(layered.Commands.Length)==2,"Layer completion boundary wrong");
+}
+File.WriteAllText(layerFile,"G90\nM83\nG1 Z0.2\nG1 X10 E1\nG1 Z0.8\nG1 X20\nG1 Z0.2\nG1 X30 E1\nG1 Z0.4\nG1 X40 E1\n");
+var estimated = PrintJob.Load(layerFile);
+Check(estimated.EstimatedLayers && estimated.LayerEndCommands.Length==2,"Unmarked layer estimate counted travel Z-hop");
+Console.WriteLine("PASS layers: Prusa/Cura markers, purge exclusion, Z-hop, confirmation boundaries and unmarked estimate.");
+
+double animationTime=0;
+var predicted = new MotionPreview(new MotionProfile(),()=>animationTime);
+predicted.Correct(new(0,0,0)); predicted.Started("G90"); predicted.Started("M83");
+predicted.Started("G1X10Y10F600");
+animationTime=.5;
+var halfway=predicted.Sample();
+Check(halfway.X>3 && halfway.X<4 && Math.Abs(halfway.X-halfway.Y)<.001,"G1 did not animate without M114");
+predicted.Correct(new(10,10,0));
+Check(predicted.Sample().X<4,"Planner endpoint M114 teleported animated head");
+animationTime=2; Check(System.Numerics.Vector3.Distance(predicted.Sample(),new(10,10,0))<.001,"G1 endpoint wrong");
+predicted.Started("G91"); predicted.Started("M220 S50"); predicted.Started("G1 X10 F600");
+animationTime=3; Check(predicted.Sample().X>14 && predicted.Sample().X<16,"Relative G1 or M220 duration wrong");
+animationTime=5; Check(Math.Abs(predicted.Sample().X-20)<.001,"Relative endpoint wrong");
+predicted.Started("G1 X50 F600"); animationTime=5.5; predicted.Stop();
+var stopped=predicted.Sample(); animationTime=9; Check(predicted.Sample()==stopped,"Stopped prediction kept moving");
+predicted.Started("G90"); predicted.Started("M220 S100"); predicted.Started("G1 X30 F600");
+predicted.Completed("M400",["ok"]); animationTime+=.2;
+Check(Math.Abs(predicted.Sample().X-30)<.001,"M400 did not synchronize prediction");
+
+animationTime=0;
+var homingPreview=new MotionPreview(MotionProfile.Ramps(),()=>animationTime);
+homingPreview.Correct(new(50,50,0)); homingPreview.Started("G28");
+Check(homingPreview.Homing && homingPreview.Pending>=10 && homingPreview.Planned==new System.Numerics.Vector3(105,81,5),"Homing phases or safe probe point wrong");
+animationTime=1; Check(homingPreview.Sample().Z>0 && homingPreview.Sample().Z<11,"Homing Z clearance not animated");
+homingPreview.Correct(new(0,0,0)); Check(homingPreview.Planned==new System.Numerics.Vector3(105,81,5),"Telemetry interrupted G28 animation");
+homingPreview.Completed("G28",["ok"]); animationTime+=.2;
+Check(System.Numerics.Vector3.Distance(homingPreview.Sample(),new(105,81,5))<.001,"Homing acknowledgement did not settle final position");
+homingPreview.Completed("M114",["X:105.00 Y:81.00 Z:5.20 E:0", "ok"]);
+Check(Math.Abs(homingPreview.Sample().Z-5.2f)<.001,"Post-homing correction missing");
+homingPreview.ReadSettings("echo: M203 X80 Y90 Z3 E8"); homingPreview.ReadSettings("echo: M201 X100 Y200 Z30");
+homingPreview.ReadSettings("echo: M204 P400 T500"); homingPreview.ReadSettings("echo: M851 X0 Y24 Z-1.5");
+Check(homingPreview.Profile.MaxFeed.X==80 && homingPreview.Profile.MaxAcceleration.Z==30 && homingPreview.Profile.PrintAcceleration==400 && homingPreview.Profile.ProbeOffset.Z==-1.5f,"Live M503 limits not read");
+
+animationTime=0;
+var arcMotion=new MotionPreview(new MotionProfile(),()=>animationTime);
+arcMotion.Correct(new(10,0,0)); arcMotion.Started("G3 X0 Y10 I-10 J0 F600"); animationTime=.7;
+var onArc=arcMotion.Sample(); Check(onArc.X>0 && onArc.Y>0 && Math.Abs(onArc.Length()-10)<.02,"Animated arc cuts through circle");
+Console.WriteLine("PASS motion: compact G1 without telemetry, relative coordinates, M220, planner correction, stop, M400, homing phases, live limits and arcs.");

@@ -1,0 +1,156 @@
+--- a/Marlin/Configuration.h
++++ b/Marlin/Configuration.h
+@@ -1906,6 +1906,7 @@
+ //#define AUTO_BED_LEVELING_3POINT
+ //#define AUTO_BED_LEVELING_LINEAR
+ #define AUTO_BED_LEVELING_BILINEAR
++#define HOST_FOUR_POINT_LEVELING // G29 K4: four corners, compatible bilinear mesh; K0: bounds query
+ //#define AUTO_BED_LEVELING_UBL
+ //#define MESH_BED_LEVELING
+ 
+--- a/Marlin/src/gcode/bedlevel/abl/G29.cpp
++++ b/Marlin/src/gcode/bedlevel/abl/G29.cpp
+@@ -34,6 +34,12 @@
+ #include "../../../module/planner.h"
+ #include "../../../module/probe.h"
+ #include "../../queue.h"
++#if ENABLED(HOST_FOUR_POINT_LEVELING)
++  #include "../../../libs/four_point_mesh.h"
++  #if !ENABLED(AUTO_BED_LEVELING_BILINEAR) || ENABLED(PROBE_MANUALLY) || !HAS_BED_PROBE
++    #error "HOST_FOUR_POINT_LEVELING requires automatic bilinear probing."
++  #endif
++#endif
+ 
+ #if ENABLED(AUTO_BED_LEVELING_LINEAR)
+   #include "../../../libs/least_squares_fit.h"
+@@ -234,6 +240,25 @@
+ 
+   DEBUG_SECTION(log_G29, "G29", DEBUGGING(LEVELING));
+ 
++  // Host extension. K0 is read-only and safe before homing. K4 probes four corners.
++  #if ENABLED(HOST_FOUR_POINT_LEVELING)
++    const bool has_k = parser.seenval('K');
++    const int16_t mode_k = has_k ? parser.value_int() : -1;
++    if (has_k && mode_k == 0) {
++      const xy_pos_t lf = xy_pos_t{ probe.min_x(), probe.min_y() }.asLogical(),
++                     rb = xy_pos_t{ probe.max_x(), probe.max_y() }.asLogical();
++      SERIAL_ECHOLNPGM("FOUR_POINT_CAPS V1 L", lf.x, " R", rb.x, " F", lf.y, " B", rb.y);
++      G29_RETURN(false, false);
++    }
++    const bool four_point = has_k && mode_k == 4;
++    if (has_k && (!four_point || parser.seen_test('W') || parser.seen_test('J') || parser.seen_test('O'))) {
++      SERIAL_ERROR_MSG("Unsupported G29 K mode or combination");
++      G29_RETURN(false, false);
++    }
++  #else
++    constexpr bool four_point = false;
++  #endif
++
+   // Leveling state is persistent when done manually with multiple G29 commands
+   TERN_(PROBE_MANUALLY, static) G29_State abl;
+ 
+@@ -410,9 +435,19 @@
+       else {
+         abl.probe_position_lf.set(parser.linearval('L', x_min), parser.linearval('F', y_min));
+         abl.probe_position_rb.set(parser.linearval('R', x_max), parser.linearval('B', y_max));
+-      }
+-
+-      if (!probe.good_bounds(abl.probe_position_lf, abl.probe_position_rb)) {
++        #if ENABLED(HOST_FOUR_POINT_LEVELING)
++          if (four_point) {
++            if (!parser.seenval('L') || !parser.seenval('R') || !parser.seenval('F') || !parser.seenval('B')) {
++              SERIAL_ERROR_MSG("G29 K4 requires L R F B");
++              G29_RETURN(false, false);
++            }
++            abl.probe_position_lf = abl.probe_position_lf.asNative();
++            abl.probe_position_rb = abl.probe_position_rb.asNative();
++          }
++        #endif
++      }
++
++      if (abl.probe_position_rb.x - abl.probe_position_lf.x < 1 || abl.probe_position_rb.y - abl.probe_position_lf.y < 1 || !probe.good_bounds(abl.probe_position_lf, abl.probe_position_rb)) {
+         if (DEBUGGING(LEVELING)) {
+           DEBUG_ECHOLNPGM("G29 L", abl.probe_position_lf.x, " R", abl.probe_position_rb.x,
+                              " F", abl.probe_position_lf.y, " B", abl.probe_position_rb.y);
+@@ -507,7 +542,7 @@
+     #endif
+ 
+     #if ENABLED(AUTO_BED_LEVELING_BILINEAR)
+-      if (!abl.dryrun && (abl.gridSpacing != bedlevel.grid_spacing || abl.probe_position_lf != bedlevel.grid_start)) {
++      if (!four_point && !abl.dryrun && (abl.gridSpacing != bedlevel.grid_spacing || abl.probe_position_lf != bedlevel.grid_start)) {
+         reset_bed_level();      // Reset grid to 0.0 or "not probed". (Also disables ABL)
+         abl.reenable = false;   // Can't re-enable (on error) until the new grid is written
+       }
+@@ -668,6 +703,29 @@
+ 
+     #if ABL_USES_GRID
+ 
++      #if ENABLED(HOST_FOUR_POINT_LEVELING)
++      if (four_point) {
++        float corners[4];
++        for (uint8_t n = 0; n < 4; ++n) {
++          abl.probePos.set((n == 1 || n == 2) ? abl.probe_position_rb.x : abl.probe_position_lf.x,
++                          n >= 2 ? abl.probe_position_rb.y : abl.probe_position_lf.y);
++          SERIAL_ECHOLNPGM("FOUR_POINT_PROBING ", int(n + 1), " X", abl.probePos.asLogical().x, " Y", abl.probePos.asLogical().y);
++          abl.measured_z = faux ? 0.001f * random(-100, 101) : probe.probe_at_point(abl.probePos, raise_after, abl.verbose_level);
++          if (isnan(abl.measured_z) || !IsRunning()) { abl.measured_z = NAN; break; }
++          corners[n] = abl.measured_z + abl.Z_offset;
++          SERIAL_ECHOLNPGM("FOUR_POINT_POINT ", int(n + 1), " Z", corners[n]);
++          idle_no_sleep();
++        }
++        if (!isnan(abl.measured_z)) {
++          for (uint8_t x = 0; x < GRID_MAX_POINTS_X; ++x)
++            for (uint8_t y = 0; y < GRID_MAX_POINTS_Y; ++y)
++              abl.z_values[x][y] = four_point_height(corners, float(x) / (GRID_MAX_POINTS_X - 1), float(y) / (GRID_MAX_POINTS_Y - 1));
++        }
++        else set_bed_leveling_enabled(abl.reenable); // The stored mesh is still untouched.
++      }
++      else
++      #endif
++      {
+       bool zig = PR_OUTER_SIZE & 1;  // Always end at RIGHT and BACK_PROBE_BED_POSITION
+ 
+       // Outer loop is X with PROBE_Y_FIRST enabled
+@@ -736,6 +794,7 @@
+ 
+         } // inner
+       } // outer
++      } // normal dense probing
+ 
+     #elif ENABLED(AUTO_BED_LEVELING_3POINT)
+ 
+@@ -949,6 +1008,12 @@
+   TERN_(HAS_MULTI_HOTEND, if (abl.tool_index != 0) tool_change(abl.tool_index));
+ 
+   report_current_position();
++  #if ENABLED(HOST_FOUR_POINT_LEVELING)
++    if (four_point) {
++      if (!abl.dryrun && !isnan(abl.measured_z) && planner.leveling_active && IsRunning()) SERIAL_ECHOLNPGM("FOUR_POINT_OK");
++      else SERIAL_ECHOLNPGM("FOUR_POINT_FAILED");
++    }
++  #endif
+ 
+   G29_RETURN(isnan(abl.measured_z), true);
+ }
+--- a/Marlin/src/gcode/host/M115.cpp
++++ b/Marlin/src/gcode/host/M115.cpp
+@@ -59,6 +59,10 @@
+  *       at https://reprap.org/wiki/Firmware_Capabilities_Protocol
+  */
+ void GcodeSuite::M115() {
++  #if ENABLED(HOST_FOUR_POINT_LEVELING)
++    SERIAL_ECHOLNPGM("Cap:FOUR_POINT_LEVELING:1");
++  #endif
++
+ 
+   SERIAL_ECHOPGM("FIRMWARE_NAME:Marlin"
+     " " DETAILED_BUILD_VERSION " (" __DATE__ " " __TIME__ ")"
+--- /dev/null
++++ b/Marlin/src/libs/four_point_mesh.h
+@@ -0,0 +1,6 @@
++#pragma once
++// Corners in clockwise order: front-left, front-right, back-right, back-left.
++// u/v are fractions of the probing rectangle, independent of the stored mesh size.
++inline float four_point_height(const float (&z)[4], const float u, const float v) {
++  return (1 - v) * ((1 - u) * z[0] + u * z[1]) + v * ((1 - u) * z[3] + u * z[2]);
++}

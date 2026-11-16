@@ -22,8 +22,11 @@ public sealed class PrinterLink : IAsyncDisposable
     private bool numbered;
     private int disposed;
     public bool Connected { get; private set; }
+    public bool SupportsFourPointLeveling { get; private set; }
     public event Action<string>? Received;
     public event Action<string>? Sent;
+    public event Action<string>? CommandStarted;
+    public event Action<string, string[]>? CommandCompleted;
     public event Action<string>? Lost;
 
     public async Task ConnectTcp(string host, int port)
@@ -53,7 +56,8 @@ public sealed class PrinterLink : IAsyncDisposable
         await Send("M110 N0");
         numbered = true;
         number = 0;
-        await Send("M115");
+        var info=await Send("M115");
+        SupportsFourPointLeveling=info.Any(l=>l.Trim()=="Cap:FOUR_POINT_LEVELING:1");
     }
 
     private async Task ReadTcp(Stream stream)
@@ -61,7 +65,7 @@ public sealed class PrinterLink : IAsyncDisposable
         try
         {
             using var input = new StreamReader(stream, Encoding.ASCII, false, 4096, true);
-            while (await input.ReadLineAsync(lifetime.Token) is { } line) ProcessLine(line);
+            while (await input.ReadLineAsync(lifetime.Token).ConfigureAwait(false) is { } line) ProcessLine(line);
             if (!lifetime.IsCancellationRequested) Fail("Принтер закрыл соединение.");
         }
         catch (Exception ex) when (ex is IOException or SocketException or OperationCanceledException or ObjectDisposedException)
@@ -126,11 +130,12 @@ public sealed class PrinterLink : IAsyncDisposable
                 var completion = new TaskCompletionSource<string[]>(TaskCreationOptions.RunContinuationsAsynchronously);
                 lock (sync) { pending = completion; replies.Clear(); resend = null; }
                 await Raw(wire);
+                if (retry == 0) CommandStarted?.Invoke(command);
                 Sent?.Invoke(command);
                 var result = await completion.Task.WaitAsync(TimeSpan.FromMinutes(15), lifetime.Token);
                 int? repeat;
                 lock (sync) { repeat = resend; pending = null; }
-                if (repeat is null) return result;
+                if (repeat is null) { CommandCompleted?.Invoke(command, result); return result; }
                 if (repeat != current) throw new IOException($"Прошивка запросила строку {repeat}, ожидалась {current}. Продолжение невозможно.");
             }
             throw new IOException("Превышено число повторных передач.");
@@ -148,8 +153,7 @@ public sealed class PrinterLink : IAsyncDisposable
         await writes.WaitAsync(lifetime.Token);
         try
         {
-            if (serial is not null) await Task.Run(() => serial.WriteLine(command));
-            else if (output is not null) await output.WriteAsync(Encoding.ASCII.GetBytes(command + "\n"), lifetime.Token);
+            if (output is not null) await output.WriteAsync(Encoding.ASCII.GetBytes(command + "\n"), lifetime.Token).ConfigureAwait(false);
             else throw new IOException("Нет соединения.");
         }
         finally { writes.Release(); }

@@ -75,6 +75,7 @@ inline int run_host_viewer(uintptr_t parent_value) {
   auto head_time=std::chrono::steady_clock::now();
   double head_duration=.1, measured_fps=0;
   unsigned frame_count=0, head_count=0, smooth_frames=0;
+  unsigned predicted_frames=0;
   auto fps_time=head_time;
   bool open_settings=false;
   UserInterface::getElement<Viewport>("Viewport")->menu_callback = [&](UiWindow* w) {
@@ -118,6 +119,13 @@ inline int run_host_viewer(uintptr_t parent_value) {
       std::error_code error; std::filesystem::remove(std::filesystem::u8path(path), error);
       printf("VIEWER_SCENE %u\n", count);
     }
+    else if (op == "POSE") {
+      float x,y,z; if(stream >> x >> y >> z) {
+        head_from=head_target={x,z,-y};
+        vis.extrusion[0].position=glm::vec4(head_target,0);
+        head_time=std::chrono::steady_clock::now(); head_received=true; ++head_count; ++predicted_frames;
+      }
+    }
     else if (op == "HEAD") {
       float x,y,z; if(stream >> x >> y >> z) {
         const auto now=std::chrono::steady_clock::now();
@@ -128,7 +136,7 @@ inline int run_host_viewer(uintptr_t parent_value) {
         head_time=now; head_received=true; ++head_count;
       }
     }
-    else if (op == "STATS") printf("VIEWER_STATS fps=%.1f heads=%u interpolated=%u printed=%zu segments=%zu cursor=%d relative=%d\n",measured_fps,head_count,smooth_frames,printed_cursor,scene.size(),SDL_ShowCursor(SDL_QUERY),SDL_GetRelativeMouseMode());
+    else if (op == "STATS") printf("VIEWER_STATS fps=%.1f heads=%u interpolated=%u printed=%zu segments=%zu cursor=%d relative=%d predicted=%u\n",measured_fps,head_count,smooth_frames,printed_cursor,scene.size(),SDL_ShowCursor(SDL_QUERY),SDL_GetRelativeMouseMode(),predicted_frames);
     else if (op == "RESET") {
       vis.camera.position = {37,121,129}; vis.camera.look_at({build_plate_dimension.x*.5f,0,-build_plate_dimension.y*.5f});
     }
