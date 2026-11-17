@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.IO.Ports;
 using System.Net.Sockets;
 using MarlinEmulator.Core;
@@ -20,6 +20,7 @@ internal sealed class MainForm : Form
     private FirmwareSession? session;
     private SerialBridge? bridge;
     private TcpConnection? tcpConnection;
+    private ResetServer? resetServer;
     private bool ExternalConnected => bridge is not null || tcpConnection is not null;
     private CancellationTokenSource? printing;
     private Process? firmware;
@@ -194,6 +195,7 @@ internal sealed class MainForm : Form
         printing?.Cancel();
         if (session is { } old) { session = null; await old.DisposeAsync(); }
         if (bridge is { } oldBridge) { bridge = null; await oldBridge.DisposeAsync(); }
+        if (resetServer is { } oldReset) { resetServer=null; await oldReset.DisposeAsync(); }
         if (tcpConnection is { } oldTcp) { tcpConnection = null; await oldTcp.DisposeAsync(); }
         connectedPort = null;
         UpdateControls();
@@ -226,6 +228,33 @@ internal sealed class MainForm : Form
         finally { current.Dispose(); UpdateControls(); }
     }
 
+    private async Task ResetFirmwareForHost()
+    {
+        if(closing || changingPort)throw new IOException("Эмулятор занят сменой подключения.");
+        changingPort=true; UpdateControls();
+        try
+        {
+            var old=firmware; firmware=null;
+            if(old is not null)
+            {
+                try { if(!old.HasExited) { old.Kill(entireProcessTree:true); await old.WaitForExitAsync(); } }
+                finally { old.Dispose(); }
+            }
+            string exe=Path.Combine(AppContext.BaseDirectory,"firmware","MarlinSimulator.exe");
+            var started=Process.Start(new ProcessStartInfo(exe) { WorkingDirectory=Path.GetDirectoryName(exe),UseShellExecute=true }) ?? throw new IOException("Не удалось перезапустить прошивку.");
+            firmware=started; started.EnableRaisingEvents=true;
+            started.Exited+=(_,_)=>Ui(()=> { if(ReferenceEquals(firmware,started)) _=Guard(SimulatorExited); });
+            for(int i=0;i<100;i++)
+            {
+                if(closing || started.HasExited)throw new IOException("Прошивка завершилась при сбросе.");
+                try { using var probe=new TcpClient(); await probe.ConnectAsync("127.0.0.1",8099); Log("Hard Reset: прошивка перезапущена. Задание не возобновляется."); return; }
+                catch(SocketException) { await Task.Delay(100); }
+            }
+            throw new IOException("Прошивка не открыла порт после сброса.");
+        }
+        finally { changingPort=false; UpdateControls(); }
+    }
+
     private async Task ToggleBridge()
     {
         if (closing || changingPort || busy) return;
@@ -248,7 +277,7 @@ internal sealed class MainForm : Form
             if (connectionType.Text == "TCP")
             {
                 int number = (int)tcpPort.Value;
-                if (number == 8099) throw new InvalidOperationException("Порт 8099 уже используется. Выберите другой TCP-порт.");
+                if (number is 8098 or 8099 or 65535) throw new InvalidOperationException("Порт 8099 уже используется. Выберите другой TCP-порт.");
                 await StartFirmware();
                 await Disconnect();
                 await Task.Delay(100);
@@ -262,6 +291,12 @@ internal sealed class MainForm : Form
                     throw;
                 }
                 tcpConnection = tcp;
+                resetServer=new ResetServer(number+1,()=> {
+                    var done=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                    Ui(async ()=> { try { await ResetFirmwareForHost(); done.TrySetResult(); } catch(Exception ex) { Log("Hard Reset: "+ex.Message); done.TrySetException(new IOException(ex.Message,ex)); } });
+                    return done.Task;
+                });
+                resetServer.Start();
                 connectedPort = $"TCP 127.0.0.1:{number}";
                 Log($"{connectedPort} — ожидание управляющей программы.");
                 return;
