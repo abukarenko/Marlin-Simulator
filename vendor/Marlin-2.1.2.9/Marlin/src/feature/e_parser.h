@@ -57,7 +57,7 @@ public:
     EP_M1,
     EP_M10, EP_M108,
     EP_M11, EP_M112,
-    EP_M4, EP_M41, EP_M410,
+    EP_M4, EP_M41, EP_M410, EP_M411,
     #if HAS_MEDIA
       EP_M5, EP_M52, EP_M524,
     #endif
@@ -78,6 +78,7 @@ public:
 
   static bool killed_by_M112;
   static bool quickstop_by_M410;
+  static bool host_stop_by_M411;
 
   #if HAS_MEDIA
     static bool sd_abort_by_M524;
@@ -173,7 +174,7 @@ public:
       case EP_M10: state = (c == '8') ? EP_M108 : EP_IGNORE; break;
       case EP_M11: state = (c == '2') ? EP_M112 : EP_IGNORE; break;
       case EP_M4:  state = (c == '1') ? EP_M41  : EP_IGNORE; break;
-      case EP_M41: state = (c == '0') ? EP_M410 : EP_IGNORE; break;
+      case EP_M41: state = (c == '0') ? EP_M410 : (c == '1') ? EP_M411 : EP_IGNORE; break;
 
       #if HAS_MEDIA
         case EP_M5:  state = (c == '2') ? EP_M52  : EP_IGNORE; break;
@@ -215,6 +216,7 @@ public:
             case EP_M108: wait_for_user = wait_for_heatup = false; break;
             case EP_M112: killed_by_M112 = true; break;
             case EP_M410: quickstop_by_M410 = true; break;
+            case EP_M411: host_stop_by_M411 = true; break;
             #if HAS_MEDIA
               case EP_M524: sd_abort_by_M524 = true; break;
             #endif

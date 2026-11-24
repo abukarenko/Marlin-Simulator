@@ -33,6 +33,7 @@
 #include "../gcode/gcode.h"
 
 #include "temperature.h"
+#include "host_stop.h"
 #include "endstops.h"
 #include "planner.h"
 #include "printcounter.h"
@@ -1876,6 +1877,10 @@ void Temperature::task() {
     if (emergency_parser.quickstop_by_M410) {
       emergency_parser.quickstop_by_M410 = false; // quickstop_stepper may call idle so clear this now!
       quickstop_stepper();
+    }
+    if (emergency_parser.host_stop_by_M411) {
+      emergency_parser.host_stop_by_M411 = false;
+      host_stop_request();
     }
 
     #if HAS_MEDIA

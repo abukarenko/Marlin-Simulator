@@ -45,6 +45,7 @@
 
 #include "module/endstops.h"
 #include "module/motion.h"
+#include "module/host_stop.h"
 #include "module/planner.h"
 #include "module/printcounter.h" // PrintCounter or Stopwatch
 #include "module/settings.h"
@@ -1670,6 +1671,7 @@ void setup() {
 void loop() {
   do {
     idle();
+    if (host_stop_pending) { host_stop_service(); continue; }
 
     #if HAS_MEDIA
       if (card.flag.abort_sd_printing) abortSDPrinting();

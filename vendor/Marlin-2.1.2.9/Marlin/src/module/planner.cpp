@@ -1,3 +1,4 @@
+#include "host_stop.h"
 /**
  * Marlin 3D Printer Firmware
  * Copyright (c) 2020 MarlinFirmware [https://github.com/MarlinFirmware/Marlin]
@@ -1827,7 +1828,7 @@ bool Planner::_buffer_steps(const xyze_long_t &target
   // If we are cleaning, do not accept queuing of movements
   // This must be after get_next_free_block() because it calls idle()
   // where cleaning_buffer_counter can be changed
-  if (cleaning_buffer_counter) return false;
+  if (cleaning_buffer_counter || host_stop_pending) return false;
 
   // Fill the block with the specified movement
   if (!_populate_block(block, target
@@ -3014,7 +3015,7 @@ bool Planner::buffer_segment(const abce_pos_t &abce
 ) {
 
   // If we are cleaning, do not accept queuing of movements
-  if (cleaning_buffer_counter) return false;
+  if (cleaning_buffer_counter || host_stop_pending) return false;
 
   // When changing extruders recalculate steps corresponding to the E position
   #if ENABLED(DISTINCT_E_FACTORS)
