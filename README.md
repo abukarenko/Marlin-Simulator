@@ -1,5 +1,9 @@
 # Marlin Simulator / Emulator
 
+**Easy Marlin Emulator** — отдельный TCP-эмулятор с настоящим экраном Marlin 128×64:
+запуск `Start-Easy-Marlin-Emulator.cmd`, [сборка и управление](LCD.md).
+[Скачать Easy Marlin Emulator 1.0.0 для Windows x64](https://github.com/abukarenko/Marlin-Simulator/releases/tag/easy-marlin-emulator-v1.0.0).
+
 ![Marlin Emulator](assets/emulator.png)
 
 [Скачать готовую сборку для Windows](https://github.com/abukarenko/Marlin-Simulator/releases/latest)

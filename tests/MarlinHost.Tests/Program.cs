@@ -342,12 +342,13 @@ if(args.Contains("--native-motion") || args.Contains("--native-motion-fast"))
     return;
 }
 
-if (args.Contains("--native"))
+if (args.Contains("--native") || args.Contains("--lcd"))
 {
+    bool lcd = args.Contains("--lcd");
     string root = Directory.GetCurrentDirectory();
-    string dir = Path.Combine(root, "artifacts", "host-native-qa"); Directory.CreateDirectory(dir);
+    string dir = Path.Combine(root, "artifacts", lcd ? "host-lcd-qa" : "host-native-qa"); Directory.CreateDirectory(dir);
     File.WriteAllText(Path.Combine(dir, "simulator.settings"), "speed=30\n");
-    var start = new ProcessStartInfo(Path.Combine(root, "dist", "firmware", "MarlinSimulator.exe")) { WorkingDirectory = dir, UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden };
+    var start = new ProcessStartInfo(lcd ? Path.Combine(root, "dist", "lcd", "EasyMarlinEmulator.exe") : Path.Combine(root, "dist", "firmware", "MarlinSimulator.exe")) { WorkingDirectory = dir, UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden };
     start.ArgumentList.Add("--port"); start.ArgumentList.Add("18199"); start.ArgumentList.Add("--quit-after"); start.ArgumentList.Add("300");
     start.Environment["PATH"] = Path.Combine(root, ".tools", "mingw64", "bin") + Path.PathSeparator + Environment.GetEnvironmentVariable("PATH");
     using var firmware = Process.Start(start)!;
@@ -357,7 +358,7 @@ if (args.Contains("--native"))
         await using var relay = new MarlinEmulator.Core.TcpConnection(0, 18199); relay.Start();
         await using var link = new PrinterLink();
         link.Received += l => { if (l.StartsWith("Error:") || l.Contains("Min:")) Console.WriteLine(l); };
-        await link.ConnectTcp("127.0.0.1", relay.Port);
+        await link.ConnectTcp("127.0.0.1", lcd ? 18199 : relay.Port);
         var control = new PrintController(link); await control.Initialize();
         Check(control.MaxZ == 250 && control.MinX == 0 && control.MinY == 0, "M211 bounds not read");
         await control.Manual("G28\nG90\nM83\nG1 X30 Y40 Z2 F3000");

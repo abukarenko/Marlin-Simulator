@@ -138,7 +138,7 @@
 //#define BLUETOOTH
 
 // Name displayed in the LCD "Ready" message and Info menu
-#define CUSTOM_MACHINE_NAME "Marlin Emulator"
+#define CUSTOM_MACHINE_NAME MARLIN_DESKTOP_MACHINE_NAME
 
 // Printer's unique ID, used by some programs to differentiate between machines.
 // Choose your own or use a service like https://www.uuidgenerator.net/version4
@@ -3408,3 +3408,12 @@
 
 // Disable servo with M282 to reduce power consumption, noise, and heat when not in use
 //#define SERVO_DETACH_GCODE
+
+// Desktop LCD emulator profile
+#ifdef MARLIN_LCD_EMULATOR
+  #define MARLIN_DESKTOP_MACHINE_NAME "Easy Marlin Emulator"
+  #define REPRAP_DISCOUNT_FULL_GRAPHIC_SMART_CONTROLLER
+  #define SET_PROGRESS_MANUALLY
+#else
+  #define MARLIN_DESKTOP_MACHINE_NAME "Marlin Emulator"
+#endif

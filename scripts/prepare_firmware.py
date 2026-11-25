@@ -11,7 +11,7 @@ def main():
     text = config.read_text(encoding='utf-8')
     settings = {
         'MOTHERBOARD': 'BOARD_SIMULATED', 'BAUDRATE': '115200', 'SERIAL_PORT_2': '3',
-        'CUSTOM_MACHINE_NAME': '"Marlin Emulator"',
+        'CUSTOM_MACHINE_NAME': 'MARLIN_DESKTOP_MACHINE_NAME',
         'X_BED_SIZE': '220', 'Y_BED_SIZE': '220', 'Z_MAX_POS': '250',
         'EEPROM_SETTINGS': '', 'EEPROM_AUTO_INIT': '',
         'USE_XMAX_PLUG': '', 'USE_YMAX_PLUG': '', 'USE_ZMAX_PLUG': '',
@@ -21,6 +21,15 @@ def main():
                              lambda m: m[1] + '#define ' + key + (' ' + value if value else ''), text, flags=re.M)
         if count != 1:
             raise RuntimeError(f'Expected one definition of {key}, found {count}')
+    config.write_text(text, encoding='utf-8')
+    # Dedicated LCD build; leave the original simulator profile unchanged.
+    text = config.read_text(encoding='utf-8')
+    marker = '// Desktop LCD emulator profile'
+    profile = marker + '\n#ifdef MARLIN_LCD_EMULATOR\n  #define MARLIN_DESKTOP_MACHINE_NAME "Easy Marlin Emulator"\n  #define REPRAP_DISCOUNT_FULL_GRAPHIC_SMART_CONTROLLER\n  #define SET_PROGRESS_MANUALLY\n#else\n  #define MARLIN_DESKTOP_MACHINE_NAME "Marlin Emulator"\n#endif\n'
+    if marker in text:
+        text = re.sub(re.escape(marker) + r'\n#ifdef MARLIN_LCD_EMULATOR\n.*?\n#endif\n', lambda _: profile, text, flags=re.S)
+    else:
+        text += '\n' + profile
     config.write_text(text, encoding='utf-8')
     advanced = MARLIN / 'Marlin' / 'Configuration_adv.h'
     text = advanced.read_text(encoding='utf-8')
@@ -55,6 +64,11 @@ def main():
         text = text.replace('-lSDL2_net -lopengl32', '-lSDL2_net -lws2_32 -lopengl32')
     ini.write_text(text, encoding='utf-8')
 
+    text = ini.read_text(encoding='utf-8')
+    if '[env:lcd_windows]' not in text:
+        text += '\n[env:lcd_windows]\nextends = env:simulator_windows\nbuild_flags = ${env:simulator_windows.build_flags} -DMARLIN_LCD_EMULATOR\n'
+        ini.write_text(text, encoding='utf-8')
+
     # Bind the emulator endpoint only to this computer.
     socket = ROOT / 'vendor/MarlinSimUI-29c11d4f63/src/MarlinSimulator/RawSocketSerial.h'
     shutil.copy2(ROOT / 'native/RawSocketSerialWindows.h', socket)
@@ -64,6 +78,28 @@ def main():
         text = source.read_text(encoding='utf-8')
         text = text.replace('#include "RawSocketSerial.h"\n', '')
         source.write_text('#include "RawSocketSerial.h"\n' + text, encoding='utf-8')
+    shutil.copy2(ROOT / 'native/LcdEmulator.h', socket.parent / 'LcdEmulator.h')
+    source = socket.parent / 'main.cpp'
+    text = source.read_text(encoding='utf-8')
+    if '#include "LcdEmulator.h"' not in text:
+        text = text.replace('// Main code', '#include "LcdEmulator.h"\n\n// Main code')
+        text = text.replace('  uint16_t port = 8099;', '''  #ifdef MARLIN_LCD_EMULATOR
+    return run_lcd_emulator(argc, argv);
+  #endif
+  uint16_t port = 8099;''')
+    source.write_text(text, encoding='utf-8')
+    # Serialize LCD bus writes, rendering and physical encoder input.
+    source = socket.parent / 'hardware/ST7920Device.h'
+    text = source.read_text(encoding='utf-8')
+    if 'state_mutex' not in text:
+        text = text.replace('#include <list>', '#include <list>\n#include <mutex>')
+        text = text.replace('  enum KeyName {', '  std::recursive_mutex state_mutex;\n  enum KeyName {')
+    source.write_text(text, encoding='utf-8')
+    source = socket.parent / 'hardware/ST7920Device.cpp'
+    text = source.read_text(encoding='utf-8')
+    for signature in ('void ST7920Device::process_command(Command cmd)', 'void ST7920Device::update()', 'void ST7920Device::interrupt(GpioEvent& ev)'):
+        text = text.replace(signature + ' {\n', signature + ' {\n  std::scoped_lock lock(state_mutex);\n') if signature + ' {\n  std::scoped_lock lock(state_mutex);' not in text else text
+    source.write_text(text, encoding='utf-8')
     source = socket.parent / 'execution_control.cpp'
     text = source.read_text(encoding='utf-8')
     text = text.replace('''  if (terminal_3) {

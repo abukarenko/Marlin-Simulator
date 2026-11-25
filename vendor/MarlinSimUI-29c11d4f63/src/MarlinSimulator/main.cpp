@@ -59,6 +59,8 @@ void simulation_main() {
   }
 }
 
+#include "LcdEmulator.h"
+
 // Main code
 int main(int argc, char** argv) {
   setvbuf(stdout, nullptr, _IONBF, 0);
@@ -70,6 +72,9 @@ int main(int argc, char** argv) {
     for (unsigned i=0;i<count;++i) fprintf(stderr,"Frame: %p\n",frames[i]);
     return EXCEPTION_EXECUTE_HANDLER;
   });
+  #ifdef MARLIN_LCD_EMULATOR
+    return run_lcd_emulator(argc, argv);
+  #endif
   uint16_t port = 8099;
   double quit_after = 0;
   std::string snapshot;

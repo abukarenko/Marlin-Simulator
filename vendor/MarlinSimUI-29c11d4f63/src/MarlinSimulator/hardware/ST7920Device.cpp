@@ -33,6 +33,7 @@ ST7920Device::ST7920Device(pin_type clk, pin_type mosi, pin_type cs, pin_type be
 ST7920Device::~ST7920Device() {}
 
 void ST7920Device::process_command(Command cmd) {
+  std::scoped_lock lock(state_mutex);
   if (cmd.rs) {
     // Data write
     if (extended_instruction_set) {
@@ -195,6 +196,7 @@ void ST7920Device::process_command(Command cmd) {
  */
 
 void ST7920Device::update() {
+  std::scoped_lock lock(state_mutex);
   auto now = clock.now();
   float delta = std::chrono::duration_cast<std::chrono::duration<float>>(now - last_update).count();
 
@@ -271,6 +273,7 @@ void ST7920Device::update() {
 }
 
 void ST7920Device::interrupt(GpioEvent& ev) {
+  std::scoped_lock lock(state_mutex);
   if (ev.pin_id == clk_pin && ev.event == GpioEvent::RISE && Gpio::get_pin_value(cs_pin)){
     incoming_byte = (incoming_byte << 1) | Gpio::get_pin_value(mosi_pin);
     if (++incoming_bit_count == 8) {

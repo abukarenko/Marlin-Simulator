@@ -6,6 +6,7 @@
 #include "../user_interface.h"
 
 #include <list>
+#include <mutex>
 #include <deque>
 
 #include "../virtual_printer.h"
@@ -13,6 +14,7 @@
 
 class ST7920Device: public VirtualPrinter::Component {
 public:
+  std::recursive_mutex state_mutex;
   enum KeyName {
     KILL_BUTTON, ENCODER_BUTTON, BACK_BUTTON, COUNT
   };

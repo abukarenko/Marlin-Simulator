@@ -6,9 +6,31 @@
     "directory": "vendor/Marlin-2.1.2.9"
   },
   "libraries": [
-    {"name": "MarlinSimUI", "commit": "29c11d4f63", "repository": "https://github.com/p3p/MarlinSimUI", "archive_sha256": "9555dc49f1de359fc5b0b1d3dd9049ed0370122940297e2f1e7732a982989c4d"},
-    {"name": "Adafruit_NeoPixel", "commit": "c6b319f447", "repository": "https://github.com/p3p/Adafruit_NeoPixel", "archive_sha256": "96b7179465c2c0d2d0a6e922034d968469dcc8d77049518d05b66f876f2e16d4"},
-    {"name": "LiquidCrystal", "commit": "322fb5fc23", "repository": "https://github.com/p3p/LiquidCrystal", "archive_sha256": "15a42bef210040471aded8cd78629284ab0eef7403b4c7e89b0b0a7a61b6ea33"}
+    {
+      "name": "MarlinSimUI",
+      "commit": "29c11d4f63",
+      "repository": "https://github.com/p3p/MarlinSimUI",
+      "archive_sha256": "9555dc49f1de359fc5b0b1d3dd9049ed0370122940297e2f1e7732a982989c4d"
+    },
+    {
+      "name": "Adafruit_NeoPixel",
+      "commit": "c6b319f447",
+      "repository": "https://github.com/p3p/Adafruit_NeoPixel",
+      "archive_sha256": "96b7179465c2c0d2d0a6e922034d968469dcc8d77049518d05b66f876f2e16d4"
+    },
+    {
+      "name": "LiquidCrystal",
+      "commit": "322fb5fc23",
+      "repository": "https://github.com/p3p/LiquidCrystal",
+      "archive_sha256": "15a42bef210040471aded8cd78629284ab0eef7403b4c7e89b0b0a7a61b6ea33"
+    },
+    {
+      "name": "U8glib-HAL",
+      "version": "0.5.4",
+      "registry": "https://registry.platformio.org/libraries/marlinfirmware/U8glib-HAL",
+      "license": "BSD-2-Clause and bundled font/icon licenses (see LICENSE)",
+      "usage": "Easy Marlin Emulator graphical LCD firmware"
+    }
   ],
   "reference_project": "../Virtual_CNC",
   "local_changes": [
@@ -24,6 +46,7 @@
     "Automatic UI preferences and reset defaults; preserve wall-clock lag for accurate realtime",
     "Release render-list mesh references before GL/mutex teardown",
     "Viewport XYZ overlay, dashed nozzle-to-bed projection and right-drag camera pan",
-    "Unified connect/disconnect process lifetime and original printer application icons"
+    "Unified connect/disconnect process lifetime and original printer application icons",
+    "Easy Marlin Emulator 1.0.0: dedicated TCP-only ST7920 128x64 window, integer scaling, encoder input, manual LCD progress and portable Windows release"
   ]
 }
