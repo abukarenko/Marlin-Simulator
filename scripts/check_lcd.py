@@ -1,5 +1,6 @@
 """Integration check against the real LCD firmware, using an isolated TCP port."""
 from pathlib import Path
+import argparse
 import socket
 import subprocess
 import time
@@ -10,7 +11,12 @@ ARTIFACTS = ROOT / 'artifacts'
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--exe', type=Path, default=EXE, help='Executable to verify, including an unpacked release')
+    exe = parser.parse_args().exe.resolve()
     ARTIFACTS.mkdir(exist_ok=True)
+    work = ARTIFACTS / 'lcd-native-qa'
+    work.mkdir(exist_ok=True)
     # Let Windows choose a free loopback port for this run.
     with socket.socket() as probe:
         probe.bind(('127.0.0.1', 0))
@@ -25,10 +31,10 @@ def main():
     startup = subprocess.STARTUPINFO()
     startup.dwFlags = subprocess.STARTF_USESHOWWINDOW
     startup.wShowWindow = 0
-    process = subprocess.Popen([str(EXE), '--port', str(port), '--scale', '4',
+    process = subprocess.Popen([str(exe), '--port', str(port), '--scale', '4',
                                 '--quit-after', '50', '--snapshot', str(snapshot),
                                 '--snapshot-after', '20'],
-                               cwd=EXE.parent, startupinfo=startup)
+                               cwd=work, startupinfo=startup)
     try:
         deadline = time.monotonic() + 15
         while True:

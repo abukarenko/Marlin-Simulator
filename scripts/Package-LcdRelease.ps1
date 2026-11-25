@@ -13,6 +13,13 @@ foreach ($dll in @('libgcc_s_seh-1.dll', 'libwinpthread-1.dll', 'libstdc++-6.dll
 Copy-Item -LiteralPath (Join-Path $root '.tools/mingw64/share/licenses') -Destination (Join-Path $package 'licenses') -Recurse
 Copy-Item -LiteralPath (Join-Path $root 'vendor/Marlin-2.1.2.9/.pio/libdeps/lcd_windows/U8glib-HAL/LICENSE') -Destination (Join-Path $package 'licenses/U8glib-HAL-LICENSE.txt')
 Copy-Item -LiteralPath (Join-Path $root 'vendor/MarlinSimUI-29c11d4f63/LICENSE') -Destination (Join-Path $package 'licenses/MarlinSimUI-LICENSE.txt')
+$thirdParty = Join-Path $root 'vendor/MarlinSimUI-29c11d4f63/vendor'
+Get-ChildItem -LiteralPath $thirdParty -Recurse -File -Filter '*LICENSE*' | ForEach-Object {
+    $relative = $_.FullName.Substring($thirdParty.Length + 1)
+    $destination = Join-Path $package "licenses/MarlinSimUI-vendor/$relative"
+    New-Item -ItemType Directory -Force -Path (Split-Path $destination -Parent) | Out-Null
+    Copy-Item -LiteralPath $_.FullName -Destination $destination
+}
 Copy-Item -LiteralPath (Join-Path $root 'LICENSE') -Destination (Join-Path $package 'LICENSE.txt')
 Copy-Item -LiteralPath (Join-Path $root 'SOURCES.json') -Destination $package
 Copy-Item -LiteralPath (Join-Path $root 'LCD.md') -Destination (Join-Path $package 'README.md')

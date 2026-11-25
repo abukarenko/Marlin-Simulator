@@ -23,7 +23,14 @@ try {
     } finally { $env:PATH = $oldPath; $env:PLATFORMIO_CORE_DIR = $oldCore }
     New-Item -ItemType Directory -Force dist/lcd | Out-Null
     Copy-Item vendor/Marlin-2.1.2.9/.pio/build/lcd_windows/debug/MarlinSimulator.exe dist/lcd/EasyMarlinEmulator.exe
-    Copy-Item .tools/mingw64/bin/*.dll dist/lcd/
+    Get-ChildItem .tools/mingw64/bin/*.dll | ForEach-Object {
+        $destination = Join-Path $root ("dist/lcd/" + $_.Name)
+        # An existing emulator may still use these identical runtime libraries.
+        if (-not (Test-Path -LiteralPath $destination) -or
+            (Get-FileHash -LiteralPath $_.FullName).Hash -ne (Get-FileHash -LiteralPath $destination).Hash) {
+            Copy-Item -LiteralPath $_.FullName -Destination $destination
+        }
+    }
     Copy-Item LICENSE dist/lcd/LICENSE.txt
     New-Item -ItemType Directory -Force dist/lcd/licenses | Out-Null
     Copy-Item .tools/mingw64/share/licenses/* dist/lcd/licenses/ -Recurse -Force
