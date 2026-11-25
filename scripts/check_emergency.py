@@ -1,11 +1,15 @@
 """Verify checksummed input and M112 during M109. Leaves the simulator halted."""
 from pathlib import Path
+import argparse
 import socket
 import time
 
 root = Path(__file__).resolve().parents[1]
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--port', type=int, default=8099)
+args = parser.parse_args()
 lines = []
-with socket.create_connection(('127.0.0.1', 8099), timeout=10) as connection:
+with socket.create_connection(('127.0.0.1', args.port), timeout=10) as connection:
     connection.settimeout(10)
     reader = connection.makefile('rb')
     def read():

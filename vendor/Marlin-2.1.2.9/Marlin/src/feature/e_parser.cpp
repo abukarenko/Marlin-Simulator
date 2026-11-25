@@ -33,6 +33,7 @@
 // Static data members
 bool EmergencyParser::killed_by_M112, // = false
      EmergencyParser::quickstop_by_M410,
+     EmergencyParser::host_stop_by_M411,
      #if HAS_MEDIA
        EmergencyParser::sd_abort_by_M524,
      #endif

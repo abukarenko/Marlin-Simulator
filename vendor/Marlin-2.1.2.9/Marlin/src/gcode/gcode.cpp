@@ -604,7 +604,7 @@ void GcodeSuite::process_parsed_command(const bool no_ok/*=false*/) {
           case 876: M876(); break;                                // M876: Handle Host prompt responses
         #endif
       #else
-        case 108: case 112: case 410:
+        case 108: case 112: case 410: case 411:
         TERN_(HOST_PROMPT_SUPPORT, case 876:)
         break;
       #endif

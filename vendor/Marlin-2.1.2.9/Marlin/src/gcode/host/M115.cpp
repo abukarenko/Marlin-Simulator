@@ -59,6 +59,9 @@
  *       at https://reprap.org/wiki/Firmware_Capabilities_Protocol
  */
 void GcodeSuite::M115() {
+  #if ENABLED(EMERGENCY_PARSER)
+    SERIAL_ECHOLNPGM("Cap:HOST_STOP:1");
+  #endif
 
   SERIAL_ECHOPGM("FIRMWARE_NAME:Marlin"
     " " DETAILED_BUILD_VERSION " (" __DATE__ " " __TIME__ ")"
