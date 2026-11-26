@@ -47,6 +47,9 @@
     "Release render-list mesh references before GL/mutex teardown",
     "Viewport XYZ overlay, dashed nozzle-to-bed projection and right-drag camera pan",
     "Unified connect/disconnect process lifetime and original printer application icons",
-    "Easy Marlin Emulator 1.0.0: dedicated TCP-only ST7920 128x64 window, integer scaling, encoder input, manual LCD progress and portable Windows release"
+    "Easy Marlin Emulator 1.0.0: dedicated TCP-only ST7920 128x64 window, integer scaling, encoder input, manual LCD progress and portable Windows release",
+    "Authoritative editable Configuration.h and Configuration_adv.h at project root; copied unchanged into Marlin and alongside the LCD executable",
+    "Dual fixed hotends on one carriage (T1 X+46 Y0 Z0), independent E0/E1 and heaters, BLTouch X+23 Y-44 with provisional virtual Z-2, bilinear 3x3 and safe Z homing",
+    "NativeServo HAL adapter maps servo commands to 16-bit virtual GPIO PWM for BLTouch"
   ]
 }

@@ -1,4 +1,4 @@
-param([string]$Version = '1.0.0')
+param([string]$Version = '1.1.0')
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 $package = Join-Path $root "artifacts/Easy-Marlin-Emulator-$Version-win-x64"
@@ -19,6 +19,9 @@ Get-ChildItem -LiteralPath $thirdParty -Recurse -File -Filter '*LICENSE*' | ForE
     $destination = Join-Path $package "licenses/MarlinSimUI-vendor/$relative"
     New-Item -ItemType Directory -Force -Path (Split-Path $destination -Parent) | Out-Null
     Copy-Item -LiteralPath $_.FullName -Destination $destination
+}
+foreach ($name in @('Configuration.h', 'Configuration_adv.h')) {
+    Copy-Item -LiteralPath (Join-Path $root "dist/lcd/$name") -Destination $package
 }
 Copy-Item -LiteralPath (Join-Path $root 'LICENSE') -Destination (Join-Path $package 'LICENSE.txt')
 Copy-Item -LiteralPath (Join-Path $root 'SOURCES.json') -Destination $package

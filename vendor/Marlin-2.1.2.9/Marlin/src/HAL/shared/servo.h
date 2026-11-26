@@ -66,7 +66,9 @@
  *                   With DEACTIVATE_SERVOS_AFTER_MOVE wait SERVO_DELAY and detach.
  */
 
-#if IS_TEENSY32
+#if defined(__PLAT_NATIVE_SIM__)
+  #include "../NATIVE_SIM/Servo.h"
+#elif IS_TEENSY32
   #include "../TEENSY31_32/Servo.h"
 #elif IS_TEENSY35 || IS_TEENSY36
   #include "../TEENSY35_36/Servo.h"

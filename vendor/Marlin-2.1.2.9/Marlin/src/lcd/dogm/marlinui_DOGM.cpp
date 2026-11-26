@@ -250,6 +250,11 @@ bool MarlinUI::detected() { return true; }
   }
 
   void MarlinUI::bootscreen_completion(const millis_t sofar) {
+    #ifdef MARLIN_LCD_EMULATOR
+      extern void easy_marlin_bootscreen_hold();
+      easy_marlin_bootscreen_hold(); // Easy Marlin Emulator: hold the startup logo for one second
+      return;
+    #endif
     if ((BOOTSCREEN_TIMEOUT) / bootscreen_pages > sofar) safe_delay((BOOTSCREEN_TIMEOUT) / bootscreen_pages - sofar);
   }
 

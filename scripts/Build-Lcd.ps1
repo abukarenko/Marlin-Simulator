@@ -1,9 +1,10 @@
-param()
+param([string]$ConfigurationDirectory = (Split-Path $PSScriptRoot -Parent))
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 Push-Location $root
 try {
-    & python scripts/prepare_firmware.py
+    $ConfigurationDirectory = (Resolve-Path -LiteralPath $ConfigurationDirectory).Path
+    & python scripts/prepare_firmware.py --configuration-dir $ConfigurationDirectory
     if ($LASTEXITCODE -ne 0) { throw 'Firmware preparation failed' }
     $pio = Get-Command pio -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
     if (-not $pio) { $pio = Join-Path $env:USERPROFILE '.platformio\penv\Scripts\pio.exe' }
@@ -34,6 +35,13 @@ try {
     Copy-Item LICENSE dist/lcd/LICENSE.txt
     New-Item -ItemType Directory -Force dist/lcd/licenses | Out-Null
     Copy-Item .tools/mingw64/share/licenses/* dist/lcd/licenses/ -Recurse -Force
+    foreach ($name in @('Configuration.h', 'Configuration_adv.h')) {
+        $sourceHeader = Join-Path $ConfigurationDirectory $name
+        $outputHeader = Join-Path $root "dist/lcd/$name"
+        if ([IO.Path]::GetFullPath($sourceHeader) -ne [IO.Path]::GetFullPath($outputHeader)) {
+            Copy-Item -LiteralPath $sourceHeader -Destination $outputHeader
+        }
+    }
     Copy-Item LCD.md dist/lcd/
     Write-Host 'Ready: dist\lcd\EasyMarlinEmulator.exe'
 } finally { Pop-Location }

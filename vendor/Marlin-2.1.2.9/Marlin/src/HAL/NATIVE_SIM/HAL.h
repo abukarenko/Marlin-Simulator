@@ -52,7 +52,7 @@ uint8_t _getc();
 // ------------------------
 
 #define CPU_32_BIT
-#define SHARED_SERVOS HAS_SERVOS  // Use shared/servos.cpp
+#define SHARED_SERVOS 0  // NativeServo implements virtual PWM
 
 #define F_CPU 100000000
 #define SystemCoreClock F_CPU

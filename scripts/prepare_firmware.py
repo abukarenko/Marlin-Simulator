@@ -1,44 +1,66 @@
 """Configure the pinned Marlin release for a desktop Cartesian printer."""
 from pathlib import Path
 import re
+import argparse
 import shutil
 
 ROOT = Path(__file__).resolve().parents[1]
 MARLIN = ROOT / 'vendor' / 'Marlin-2.1.2.9'
 
 def main():
-    config = MARLIN / 'Marlin' / 'Configuration.h'
-    text = config.read_text(encoding='utf-8')
-    settings = {
-        'MOTHERBOARD': 'BOARD_SIMULATED', 'BAUDRATE': '115200', 'SERIAL_PORT_2': '3',
-        'CUSTOM_MACHINE_NAME': 'MARLIN_DESKTOP_MACHINE_NAME',
-        'X_BED_SIZE': '220', 'Y_BED_SIZE': '220', 'Z_MAX_POS': '250',
-        'EEPROM_SETTINGS': '', 'EEPROM_AUTO_INIT': '',
-        'USE_XMAX_PLUG': '', 'USE_YMAX_PLUG': '', 'USE_ZMAX_PLUG': '',
-    }
-    for key, value in settings.items():
-        text, count = re.subn(r'^(\s*)(?://\s*)?#define\s+' + key + r'\b[^\n]*',
-                             lambda m: m[1] + '#define ' + key + (' ' + value if value else ''), text, flags=re.M)
-        if count != 1:
-            raise RuntimeError(f'Expected one definition of {key}, found {count}')
-    config.write_text(text, encoding='utf-8')
-    # Dedicated LCD build; leave the original simulator profile unchanged.
-    text = config.read_text(encoding='utf-8')
-    marker = '// Desktop LCD emulator profile'
-    profile = marker + '\n#ifdef MARLIN_LCD_EMULATOR\n  #define MARLIN_DESKTOP_MACHINE_NAME "Easy Marlin Emulator"\n  #define REPRAP_DISCOUNT_FULL_GRAPHIC_SMART_CONTROLLER\n  #define SET_PROGRESS_MANUALLY\n#else\n  #define MARLIN_DESKTOP_MACHINE_NAME "Marlin Emulator"\n#endif\n'
-    if marker in text:
-        text = re.sub(re.escape(marker) + r'\n#ifdef MARLIN_LCD_EMULATOR\n.*?\n#endif\n', lambda _: profile, text, flags=re.S)
-    else:
-        text += '\n' + profile
-    config.write_text(text, encoding='utf-8')
-    advanced = MARLIN / 'Marlin' / 'Configuration_adv.h'
-    text = advanced.read_text(encoding='utf-8')
-    text = re.sub(r'^(\s*)//#define EMERGENCY_PARSER\b', r'\1#define EMERGENCY_PARSER', text, flags=re.M)
-    text = re.sub(r'^(\s*)//#define M114_REALTIME\b', r'\1#define M114_REALTIME', text, flags=re.M)
-    advanced.write_text(text, encoding='utf-8')
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--configuration-dir', type=Path, default=ROOT,
+                        help='Directory containing the two authoritative Marlin configuration headers')
+    source_dir = parser.parse_args().configuration_dir.resolve()
+    names = ('Configuration.h', 'Configuration_adv.h')
+    # Validate both inputs before replacing either generated build header.
+    for name in names:
+        source = source_dir / name
+        if not source.is_file():
+            raise FileNotFoundError(f'Missing firmware configuration: {source}')
+        if source.resolve() == (MARLIN / 'Marlin' / name).resolve():
+            raise ValueError('Use editable configuration headers outside the vendor build directory')
     (ROOT / 'config').mkdir(exist_ok=True)
-    for name in ('Configuration.h', 'Configuration_adv.h'):
-        shutil.copy2(MARLIN / 'Marlin' / name, ROOT / 'config' / name)
+    for name in names:
+        source = source_dir / name
+        shutil.copy2(source, MARLIN / 'Marlin' / name)
+        mirror = ROOT / 'config' / name
+        if source.resolve() != mirror.resolve():
+            shutil.copy2(source, mirror)
+    print(f'Firmware configuration source: {source_dir}')
+
+    # The upstream native HAL has no usable servo implementation. Route Marlin's
+    # standard servo API through the virtual GPIO PWM model for BLTouch.
+    native_hal = MARLIN / 'Marlin/src/HAL/NATIVE_SIM'
+    for source, output in (('NativeServo.h', 'Servo.h'), ('NativeServo.cpp', 'Servo.cpp')):
+        shutil.copy2(ROOT / 'native' / source, native_hal / output)
+    hal_header = native_hal / 'HAL.h'
+    text = hal_header.read_text(encoding='utf-8')
+    text = text.replace('#define SHARED_SERVOS HAS_SERVOS  // Use shared/servos.cpp',
+                        '#define SHARED_SERVOS 0  // NativeServo implements virtual PWM')
+    hal_header.write_text(text, encoding='utf-8')
+    shared = MARLIN / 'Marlin/src/HAL/shared/servo.h'
+    text = shared.read_text(encoding='utf-8')
+    if '#include "../NATIVE_SIM/Servo.h"' not in text:
+        text = text.replace('#if IS_TEENSY32', '#if defined(__PLAT_NATIVE_SIM__)\n  #include "../NATIVE_SIM/Servo.h"\n#elif IS_TEENSY32', 1)
+    shared.write_text(text, encoding='utf-8')
+
+    # Keep the final logo frame visible after setup, whose duration can consume
+    # Marlin's normal bootscreen timeout before the desktop window is ready.
+    source = MARLIN / 'Marlin/src/lcd/dogm/marlinui_DOGM.cpp'
+    text = source.read_text(encoding='utf-8')
+    signature = '  void MarlinUI::bootscreen_completion(const millis_t sofar) {'
+    hold = '''
+    #ifdef MARLIN_LCD_EMULATOR
+      extern void easy_marlin_bootscreen_hold();
+      easy_marlin_bootscreen_hold(); // Easy Marlin Emulator: hold the startup logo for one second
+      return;
+    #endif'''
+    if 'Easy Marlin Emulator: hold the startup logo' not in text:
+        if text.count(signature) != 1:
+            raise RuntimeError('Expected one DOGM bootscreen completion function')
+        text = text.replace(signature, signature + hold)
+        source.write_text(text, encoding='utf-8')
 
     # Use local pinned libraries and private toolchain, independent of C:\\msys64.
     ini = MARLIN / 'ini' / 'native.ini'
@@ -125,7 +147,7 @@ def main():
     hal = socket.parent / 'marlin_hal_impl/HAL.cpp'
     text = hal.read_text(encoding='utf-8').replace('MSerialT serial_stream_3(false);', 'MSerialT serial_stream_3(true);')
     hal.write_text(text, encoding='utf-8')
-    print('Configured Marlin 2.1.2.9: Cartesian 220 x 220 x 250, one extruder, heated bed, EEPROM.')
+    print('Prepared Marlin 2.1.2.9 using the selected configuration headers (no printer settings overridden).')
 
 if __name__ == '__main__':
     main()

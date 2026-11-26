@@ -5,6 +5,11 @@
 #include <imgui_impl_opengl3.h>
 #include "hardware/ST7920Device.h"
 
+// Pause only the firmware thread; the LCD window keeps rendering the logo.
+void easy_marlin_bootscreen_hold() {
+  std::this_thread::sleep_for(std::chrono::seconds(1));
+}
+
 // Display the real ST7920 bus output. No G-code parser or telemetry polling.
 int run_lcd_emulator(int argc, char** argv) {
   int port = 7000, scale = 4;
@@ -34,7 +39,7 @@ int run_lcd_emulator(int argc, char** argv) {
         throw std::runtime_error("Unable to initialize the LCD graphics window");
       SDL_SetWindowMinimumSize(handle, 128, 64);
       SDL_SetWindowSize(handle, 128 * scale, 64 * scale);
-      SDL_SetWindowTitle(handle, ("Easy Marlin Emulator 1.0.0 | 127.0.0.1:" + std::to_string(port) + " | Wheel / Enter: encoder | F1: help").c_str());
+      SDL_SetWindowTitle(handle, ("Easy Marlin Emulator 1.1.0 | T0+T1 / BLTouch | 127.0.0.1:" + std::to_string(port) + " | Wheel / Enter: encoder | F1: help").c_str());
       ImGui::GetIO().IniFilename = nullptr;
       VirtualPrinter::on_kinematic_update = [](kinematic_state&) {};
       VirtualPrinter::build();

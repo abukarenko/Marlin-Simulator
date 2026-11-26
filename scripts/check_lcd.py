@@ -4,6 +4,7 @@ import argparse
 import socket
 import subprocess
 import time
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 EXE = ROOT / 'dist/lcd/EasyMarlinEmulator.exe'
@@ -15,8 +16,8 @@ def main():
     parser.add_argument('--exe', type=Path, default=EXE, help='Executable to verify, including an unpacked release')
     exe = parser.parse_args().exe.resolve()
     ARTIFACTS.mkdir(exist_ok=True)
-    work = ARTIFACTS / 'lcd-native-qa'
-    work.mkdir(exist_ok=True)
+    workspace = tempfile.TemporaryDirectory(prefix='marlin-lcd-qa-')
+    work = Path(workspace.name)
     # Let Windows choose a free loopback port for this run.
     with socket.socket() as probe:
         probe.bind(('127.0.0.1', 0))
@@ -141,6 +142,7 @@ def main():
         if process.poll() is None:
             process.terminate()
             process.wait(timeout=10)
+        workspace.cleanup()
         (ARTIFACTS / 'lcd-smoke.log').write_text('\n'.join(transcript) + '\n', encoding='utf-8')
 
 

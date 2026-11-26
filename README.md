@@ -1,6 +1,10 @@
 # Marlin Simulator / Emulator
 
-**Easy Marlin Emulator** — отдельный TCP-эмулятор с настоящим экраном Marlin 128×64:
+**Easy Marlin Emulator** — отдельный TCP-эмулятор с настоящим экраном Marlin 128×64.
+Локальная версия 1.1.0 настроена для Marlin Host 2: два сопла T0/T1 на общей каретке
+и BLTouch. Исходные настройки прошивки — `Configuration.h` и `Configuration_adv.h`
+в корне проекта; после изменений требуется пересборка.
+Запуск:
 запуск `Start-Easy-Marlin-Emulator.cmd`, [сборка и управление](LCD.md).
 [Скачать Easy Marlin Emulator 1.0.0 для Windows x64](https://github.com/abukarenko/Marlin-Simulator/releases/tag/easy-marlin-emulator-v1.0.0).
 
@@ -32,7 +36,7 @@
 
 [Скачать готовую сборку для Windows](https://github.com/abukarenko/Marlin-Simulator/releases/latest)
 
-**Marlin Host 0.2** — отдельное приложение управления принтером: запуск `Start-Host.cmd`, [инструкция и возможности](HOST.md).
+**Marlin Host 2** — отдельное приложение управления принтером: [репозиторий](https://github.com/abukarenko/Marlin-host-2). Историческая инструкция встроенного Host: [HOST.md](HOST.md).
 
 Эмулятор 3D-принтера для Windows с **настоящей прошивкой Marlin 2.1.2.9**.
 Прошивка собирается в штатном окружении `simulator_windows` и работает с виртуальными
@@ -102,10 +106,11 @@
 |---|---|
 | Прошивка | Релиз Marlin 2.1.2.9, не bugfix-ветка |
 | Плата | BOARD_SIMULATED / RAMPS Native |
-| Кинематика | Cartesian XYZ + E |
+| Кинематика | Cartesian XYZ + E0/E1 |
 | Рабочая область | 220 × 220 × 250 мм |
-| Экструдеры | 1 |
-| Температура | Виртуальные нагреватели и термисторы сопла и стола |
+| Экструдеры | 2, общая каретка; T1: X+46, Y0, Z0 мм |
+| Температура | Независимые виртуальные нагреватели и термисторы T0, T1 и стола |
+| Датчик стола | BLTouch; X+23, Y−44 мм от T0; виртуальный Z−2 мм; bilinear 3×3 |
 | Концевики | X min, Y min, Z min, виртуальные физические контакты |
 | EEPROM | M500 / M501 / M502 / M503, файл `dist/firmware/eeprom.dat` |
 | Emergency parser | Включён |

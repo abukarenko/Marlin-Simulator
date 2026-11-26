@@ -19,3 +19,6 @@ __pycache__/
 imgui.ini
 simulator.settings
 eeprom.dat
+
+desktop.ini
+Thumbs.db
